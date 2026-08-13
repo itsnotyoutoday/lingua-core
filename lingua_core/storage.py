@@ -92,6 +92,13 @@ def region_from_endpoint(endpoint_url: str, default: str = "us-east-1") -> str:
     """
     import re
 
+    # Stores whose endpoint carries no region at all. R2 wants "auto"; defaulting to
+    # us-east-1 produces a SigV4 AccessDenied that reads like bad credentials.
+    for frag, region in (("r2.cloudflarestorage.com", "auto"),
+                         ("storage.googleapis.com", "auto")):
+        if frag in (endpoint_url or ""):
+            return region
+
     m = re.search(r"s3(?:api)?[.-]([a-z]{2}-[a-z]{2,4}-\d+)", endpoint_url or "")
     return m.group(1) if m else default
 
@@ -116,9 +123,24 @@ def load_config(path: str | Path | None = None) -> S3Config | None:
                 continue
             k, _, v = line.partition("=")
             kv[k.strip().lower()] = v.strip()
+        # Accept common spellings. A key file that differs by one field name resolves to
+        # an EMPTY bucket rather than an error, and the resulting AccessDenied reads like a
+        # credentials problem — so alias rather than demand exactness.
+        for alias, canon in (("buck_name", "bucket_name"), ("bucket", "bucket_name"),
+                             ("endpoint", "endpoint_url"), ("access_key", "access"),
+                             ("access_key_id", "access"), ("secret_key", "secret"),
+                             ("secret_access_key", "secret")):
+            if alias in kv and canon not in kv:
+                kv[canon] = kv[alias]
         if not kv.get("bucket_name") or not kv.get("access"):
             continue
-        endpoint = kv.get("endpoint_url", "")
+        endpoint = (kv.get("endpoint_url", "") or "").rstrip("/")
+        # A pasted console URL often ends in the bucket. boto3 adds the bucket itself under
+        # path addressing, so leaving it produces keys at /<bucket>/<bucket>/… — objects
+        # that write successfully and can never be found.
+        _b = kv.get("bucket_name", "")
+        if _b and endpoint.endswith("/" + _b):
+            endpoint = endpoint[: -(len(_b) + 1)]
         return S3Config(
             bucket=kv["bucket_name"],
             endpoint_url=endpoint,
