@@ -38,7 +38,7 @@ nothing about *audio*.
 
 ```
 lingua-<name>/
-  bin -> ../lingua-core/          symlink for local ergonomics (gitignored)
+  bin -> ../lingua-loader-rpc/          symlink for local ergonomics (gitignored)
   code/                           ← everything here syncs to S3 before a job runs
     <name>/stages.py              your Stage subclasses + a STAGES registry
     <name>/…                      whatever they need
@@ -51,8 +51,8 @@ The symlink only works when the repos are siblings, so a fresh clone or CI will 
 it. Depend on the package properly as well:
 
 ```bash
-pip install -e ../lingua-core            # local
-pip install git+https://github.com/itsnotyoutoday/lingua-core.git   # CI
+pip install -e ../lingua-loader-rpc            # local
+pip install git+https://github.com/itsnotyoutoday/lingua-loader-rpc.git   # CI
 ```
 
 ### 2. Write stages
