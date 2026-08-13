@@ -29,9 +29,10 @@ vocabulary is copied verbatim.
 
 ## Files
 
-    <log_dir>/jobs/<job_id>/events.jsonl   append-only, one JSON object per line
-    <log_dir>/jobs/<job_id>/status.json    latest snapshot — the cheap poll target
-    <log_dir>/jobs/<job_id>/job.log        the job's own stdout/stderr
+    runs/<job_id>/events.jsonl   append-only, one JSON object per line
+    runs/<job_id>/status.json    latest snapshot — the cheap poll target
+    runs/<job_id>/job.log        the job's own stdout/stderr
+    runs/<job_id>/spec.json      what was asked for
 
 events.jsonl is append-only so a crashed writer truncates at most the final line, and a
 reader tailing it never sees a partially-rewritten history. status.json is written whole
@@ -56,17 +57,27 @@ def _now() -> str:
 
 
 def log_root() -> Path:
-    """Where everything lands. On a pod this is under the volume mount, so it survives
-    pod death and is readable from S3 without the pod being alive."""
+    """Where run output lands.
+
+    Was `logs/<pod_id>/jobs/<job_id>/` with the status snapshot mirrored separately to
+    `status/<job_id>/` — two homes for one job's output, so "what did this job do" took
+    three lookups and cleanup could not be done safely. Now everything a job produces is
+    under `runs/<job_id>/`, which is also what makes pruning a prefix range. See
+    STRUCTURE.md.
+    """
     d = os.environ.get("LINGUA_LOG_DIR")
     if d:
         return Path(d)
-    root = Path(os.environ.get("LINGUA_LOG_ROOT", "/workspace/logs"))
-    return root / os.environ.get("RUNPOD_POD_ID", "local")
+    from . import paths
+    return paths.workspace()
 
 
 def job_dir(job_id: str) -> Path:
-    return log_root() / "jobs" / job_id
+    from . import paths
+    d = os.environ.get("LINGUA_LOG_DIR")
+    if d:
+        return Path(d) / job_id
+    return paths.path(paths.run(job_id))
 
 
 class EventLog:
@@ -186,10 +197,9 @@ class EventLog:
             st = get_storage()
             if not st.available:            # a PROPERTY on Storage, not a method
                 return
-            cfg = st.require()
-            st.client.put_object(Bucket=cfg.bucket,
-                                 Key=f"status/{self.job_id}/status.json",
-                                 Body=self.status_path.read_bytes())
+            from . import paths
+            st.put(paths.run_status(self.job_id), self.status_path.read_bytes(),
+                   where="events.EventLog._mirror")
             self._mirror_error = None
         except Exception as exc:
             # Non-fatal, but NOT invisible. Swallowing this silently is how a mirror stays

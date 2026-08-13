@@ -168,6 +168,20 @@ class Storage:
 
     # -- checks -------------------------------------------------------------------------
 
+    def put(self, key: str, body, *, where: str = "") -> dict:
+        """Write one object, validating the key against STRUCTURE.md first.
+
+        The single door for writes. Enforcing here rather than at each call site is the
+        difference between a structure and a suggestion — three incompatible layouts grew
+        in this bucket precisely because every caller invented its own path.
+
+        `where` is only for the error message, naming who tried, so the fix is obvious.
+        """
+        from . import paths
+        paths.validate(key, where=where)
+        cfg = self.require()
+        return self.client.put_object(Bucket=cfg.bucket, Key=key, Body=body)
+
     def check(self) -> dict:
         """Verify connectivity WITHOUT uploading. Run before moving anything large."""
         try:

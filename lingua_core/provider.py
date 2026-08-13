@@ -37,6 +37,8 @@ Nothing in it is provider-specific. That is what makes the local run a real rehe
 """
 from __future__ import annotations
 
+from . import paths
+
 import json
 import subprocess
 import time
@@ -283,7 +285,7 @@ class LocalProvider(BaseProvider):
         if not st.available:
             return {"ok": False, "error": "no S3 credentials (runpods3.key)"}
         dest = as_source or source
-        r = st.upload_dir(raw, f"corpus/raw/{dest}", dry_run=dry_run, max_files=limit)
+        r = st.upload_dir(raw, paths.corpus_raw(dest), dry_run=dry_run, max_files=limit)
         return {**r, "source": source, "uploaded_as": dest}
 
     # -- S3 staging: the part a pod also does ------------------------------------------
@@ -294,7 +296,7 @@ class LocalProvider(BaseProvider):
         if not st.available:
             return {"ok": False, "error": "no S3 credentials"}
         dst = REPO.parent / "corpus_data" / "raw" / source
-        r = st.download_prefix(f"corpus/raw/{source}", dst)
+        r = st.download_prefix(paths.corpus_raw(source), dst)
         return {**r, "source": source, "staged_to": str(dst)}
 
     def stage_out(self, region: str) -> dict:
@@ -495,7 +497,7 @@ class RunPodProvider(BaseProvider):
         if not st.available:
             return {"ok": False, "error": "no S3 credentials (runpods3.key)"}
         dest = as_source or source
-        r = st.upload_dir(raw, f"corpus/raw/{dest}", dry_run=dry_run, max_files=limit)
+        r = st.upload_dir(raw, paths.corpus_raw(dest), dry_run=dry_run, max_files=limit)
         return {**r, "source": source, "uploaded_as": dest}
 
     def submit(self, job: JobSpec) -> RunnerStatus:

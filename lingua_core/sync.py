@@ -59,7 +59,8 @@ def push(root: Path, *, repo: str, rev: str = "dev", profile: str | None = None,
          dry_run: bool = False) -> dict:
     from .objectstore import get_storage
 
-    prefix = f"code/{repo}/{rev}"
+    from . import paths
+    prefix = paths.code(repo, rev)
     files = collect(root)
     total = sum(p.stat().st_size for p, _ in files)
 
@@ -79,11 +80,9 @@ def push(root: Path, *, repo: str, rev: str = "dev", profile: str | None = None,
             "see lingua_core/objectstore.py")
     cfg = st.require()
     for p, k in files:
-        st.client.put_object(Bucket=cfg.bucket, Key=f"{prefix}/{k}",
-                             Body=p.read_bytes())
+        st.put(f"{prefix}/{k}", p.read_bytes(), where="sync.push")
     if rev != "dev":
-        st.client.put_object(Bucket=cfg.bucket, Key=f"code/{repo}/latest",
-                             Body=rev.encode())
+        st.put(paths.code_latest(repo), rev.encode(), where="sync.push")
     return {"files": len(files), "bytes": total, "prefix": prefix,
             "bucket": cfg.bucket,
             "spec_hint": {"code": {"root": prefix, "rev": rev}}}

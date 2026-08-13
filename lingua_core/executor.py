@@ -28,6 +28,8 @@ in one constant rather than in someone's memory.
 """
 from __future__ import annotations
 
+from . import paths
+
 import json
 import shutil
 import subprocess
@@ -220,7 +222,7 @@ class RunPodExecutor:
         raw = Path(self.repo.parent) / "corpus_data" / "raw" / source
         if not raw.exists():
             return ExecResult(False, self.name, error=f"no local source at {raw}")
-        r = self.storage.upload_dir(raw, f"corpus/raw/{source}")
+        r = self.storage.upload_dir(raw, paths.corpus_raw(source))
         return ExecResult(bool(r.get("ok")), self.name,
                           detail=r, error=r.get("error"))
 

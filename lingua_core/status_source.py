@@ -202,7 +202,7 @@ class S3StatusSource(StatusSource):
 
     kind = "s3"
 
-    def __init__(self, storage=None, prefix: str = "status", profile: str | None = None):
+    def __init__(self, storage=None, prefix: str = "runs", profile: str | None = None):
         self._storage = storage
         self.prefix = prefix
         self.profile = profile
