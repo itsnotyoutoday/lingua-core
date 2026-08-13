@@ -24,9 +24,9 @@ possible outcome for an observability feature. Each method swallows its own exce
 
 ## Why it degrades to nothing
 
-`serve.events` lives in the container image, not in this package. On a laptop with no
-harness present the import fails, `_log` stays None, and every method becomes a no-op — so
-the same code runs locally and on a pod without branching on which.
+If the log directory cannot be written — a laptop run with no workspace, a read-only mount —
+`_log` stays None and every method becomes a no-op. The same code runs locally and on a pod
+without branching on which.
 """
 from __future__ import annotations
 
@@ -45,11 +45,12 @@ class EventReporter(NullReporter):
         self.registry = registry          # optional: mirror stage outcomes into the record
         self.total = 0
         self.index = 0
-        self._log = None
         try:
-            from serve.events import EventLog        # type: ignore
+            from .events import EventLog
             self._log = EventLog(job_id)
         except Exception:
+            # Only reachable if the log directory is unwritable. Reporting must never be
+            # the reason a job fails, so degrade to a no-op rather than raise.
             self._log = None
 
     # -- emission -----------------------------------------------------------------------
