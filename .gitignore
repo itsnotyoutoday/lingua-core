@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+out/
+*.egg-info/
+.venv/
+
+# API keys — NEVER commit
+*.key
+gemini.key
+anthropic.key
+deploy/*.env
+
+# sibling-repo convenience symlink; only valid on a local checkout
+/bin

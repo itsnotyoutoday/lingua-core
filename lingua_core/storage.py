@@ -1,0 +1,254 @@
+"""S3-compatible object storage — moving corpus in and results out.
+
+Backed by RunPod's S3 endpoint for network volumes, but nothing here is RunPod-specific:
+any S3-compatible store works by pointing `endpoint_url` elsewhere.
+
+## Why object storage rather than rsync
+
+A pod is disposable. rsync ties results to one machine's lifetime; S3 outlives the pod, so a
+spot instance can vanish mid-run without losing what it already produced. It also gives the
+laptop and the pod a shared view — upload once, run anywhere.
+
+## Credentials
+
+Read from a key file, never baked into an image and never logged.
+
+    runpods3.key
+        bucket_name=…
+        endpoint_url=…
+        access=…
+        secret=…
+
+`describe()` returns a fingerprint, never the secret.
+
+## What moves, and what does not
+
+    UP    corpus_data/raw/<source>/   audio only — archives and caches are pure cost
+    DOWN  out/                        JSON, embeddings, measurements. Small.
+
+Audio never comes back: it was already uploaded, and re-downloading gigabytes to a laptop
+defeats the point of pushing the work out.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+DEFAULT_KEY_FILES = ("runpods3.key", "/run/secrets/runpods3.key",
+                     "../runpods3.key", "/app/runpods3.key")
+
+# Never uploaded: derived, re-creatable, or secret.
+SKIP_PATTERNS = (".zip", ".tgz", ".tar.gz", ".key", ".env", ".DS_Store", "__pycache__")
+
+
+@dataclass
+class S3Config:
+    bucket: str
+    endpoint_url: str
+    access_key: str
+    secret_key: str
+    region: str = "us-east-1"
+    source_file: str = ""
+
+    def describe(self) -> dict:
+        """Safe to log — fingerprints only."""
+        return {
+            "bucket": self.bucket,
+            "endpoint_url": self.endpoint_url,
+            "access_key_prefix": self.access_key[:6] + "…" if self.access_key else None,
+            "secret_fingerprint": (
+                hashlib.sha256(self.secret_key.encode()).hexdigest()[:12]
+                if self.secret_key else None),
+            "source_file": self.source_file,
+        }
+
+
+def region_from_endpoint(endpoint_url: str, default: str = "us-east-1") -> str:
+    """Derive the signing region from the endpoint host.
+
+    RunPod endpoints look like https://s3api-us-nc-1.runpod.io, and SigV4 rejects a
+    mismatched region outright:
+
+        AccessDenied: the region 'us-east-1' is wrong; expecting 'us-nc-1'
+
+    Defaulting to us-east-1 silently breaks every non-AWS S3 endpoint, so parse it.
+    """
+    import re
+
+    m = re.search(r"s3(?:api)?[.-]([a-z]{2}-[a-z]{2,4}-\d+)", endpoint_url or "")
+    return m.group(1) if m else default
+
+
+def load_config(path: str | Path | None = None) -> S3Config | None:
+    """Parse a key file of `name=value` lines. Returns None rather than raising."""
+    candidates = [path] if path else []
+    candidates += [os.environ.get("LINGUA_S3_KEY_FILE")] + list(DEFAULT_KEY_FILES)
+    for c in candidates:
+        if not c:
+            continue
+        p = Path(c)
+        if not p.is_file():
+            continue
+        kv = {}
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            kv[k.strip().lower()] = v.strip()
+        if not kv.get("bucket_name") or not kv.get("access"):
+            continue
+        endpoint = kv.get("endpoint_url", "")
+        return S3Config(
+            bucket=kv["bucket_name"],
+            endpoint_url=endpoint,
+            access_key=kv.get("access", ""),
+            secret_key=kv.get("secret", ""),
+            region=kv.get("region") or region_from_endpoint(endpoint),
+            source_file=str(p),
+        )
+    return None
+
+
+class Storage:
+    """Thin S3 wrapper: check, upload a directory, download a prefix."""
+
+    def __init__(self, cfg: S3Config | None = None):
+        self.cfg = cfg or load_config()
+        self._client = None
+
+    @property
+    def available(self) -> bool:
+        return self.cfg is not None
+
+    def require(self) -> S3Config:
+        if not self.cfg:
+            raise RuntimeError(
+                "no S3 credentials. Provide runpods3.key with bucket_name, endpoint_url, "
+                "access and secret, or set LINGUA_S3_KEY_FILE.")
+        return self.cfg
+
+    @property
+    def client(self):
+        if self._client is None:
+            import boto3
+            from botocore.config import Config
+
+            cfg = self.require()
+            self._client = boto3.client(
+                "s3",
+                endpoint_url=cfg.endpoint_url or None,
+                aws_access_key_id=cfg.access_key,
+                aws_secret_access_key=cfg.secret_key,
+                region_name=cfg.region,
+                config=Config(retries={"max_attempts": 5, "mode": "standard"},
+                              s3={"addressing_style": "path"}),
+            )
+        return self._client
+
+    # -- checks -------------------------------------------------------------------------
+
+    def check(self) -> dict:
+        """Verify connectivity WITHOUT uploading. Run before moving anything large."""
+        try:
+            cfg = self.require()
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            self.client.head_bucket(Bucket=cfg.bucket)
+            resp = self.client.list_objects_v2(Bucket=cfg.bucket, MaxKeys=5)
+            keys = [o["Key"] for o in resp.get("Contents", [])]
+            return {"ok": True, **cfg.describe(),
+                    "objects_sampled": keys,
+                    "object_count_hint": resp.get("KeyCount", 0)}
+        except Exception as exc:
+            return {"ok": False, **cfg.describe(),
+                    "error": f"{type(exc).__name__}: {str(exc)[:220]}"}
+
+    # -- transfer -----------------------------------------------------------------------
+
+    def _skip(self, p: Path) -> bool:
+        s = str(p)
+        return any(pat in s for pat in SKIP_PATTERNS)
+
+    def upload_dir(self, local: Path, prefix: str, *, dry_run: bool = False,
+                   max_files: int | None = None) -> dict:
+        local = Path(local)
+        if not local.exists():
+            return {"ok": False, "error": f"not found: {local}"}
+        files = [p for p in sorted(local.rglob("*"))
+                 if p.is_file() and not self._skip(p)]
+        if max_files:
+            files = files[:max_files]
+        total = sum(p.stat().st_size for p in files)
+
+        if dry_run:
+            return {"ok": True, "dry_run": True, "files": len(files),
+                    "bytes": total, "megabytes": round(total / 1e6, 2),
+                    "prefix": prefix,
+                    "sample": [str(p.relative_to(local)) for p in files[:5]]}
+
+        cfg = self.require()
+        sent = 0
+        for p in files:
+            key = f"{prefix.rstrip('/')}/{p.relative_to(local).as_posix()}"
+            with p.open("rb") as fh:
+                self.client.put_object(Bucket=cfg.bucket, Key=key, Body=fh)
+            sent += 1
+            if sent % 50 == 0:
+                print(f"    uploaded {sent}/{len(files)}", flush=True)
+        return {"ok": True, "files": sent, "bytes": total,
+                "megabytes": round(total / 1e6, 2), "prefix": prefix}
+
+    def download_prefix(self, prefix: str, local: Path, *,
+                        max_files: int | None = None) -> dict:
+        cfg = self.require()
+        local = Path(local)
+        local.mkdir(parents=True, exist_ok=True)
+        paginator = self.client.get_paginator("list_objects_v2")
+        got, nbytes = 0, 0
+        for page in paginator.paginate(Bucket=cfg.bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                if max_files and got >= max_files:
+                    break
+                rel = obj["Key"][len(prefix):].lstrip("/")
+                if not rel:
+                    continue
+                dst = local / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                # get_object, NOT download_file: boto3's transfer manager issues a
+                # HeadObject first, and RunPod's S3 returns 403 for HEAD even when GET is
+                # permitted. Streaming the body avoids the unsupported call entirely.
+                body = self.client.get_object(Bucket=cfg.bucket, Key=obj["Key"])["Body"]
+                with dst.open("wb") as fh:
+                    for chunk in iter(lambda: body.read(1 << 20), b""):
+                        fh.write(chunk)
+                got += 1
+                nbytes += obj.get("Size", 0)
+        return {"ok": True, "files": got, "bytes": nbytes,
+                "megabytes": round(nbytes / 1e6, 2), "prefix": prefix,
+                "local": str(local)}
+
+    def roundtrip_test(self) -> dict:
+        """Upload a tiny object, read it back, delete it. Proves write+read+delete."""
+        import io
+        import json as _json
+        from datetime import datetime, timezone
+
+        cfg = self.require()
+        key = "_lingua_selftest/roundtrip.json"
+        payload = _json.dumps({"test": True,
+                               "at": datetime.now(timezone.utc).isoformat()}).encode()
+        try:
+            self.client.put_object(Bucket=cfg.bucket, Key=key, Body=payload)
+            back = self.client.get_object(Bucket=cfg.bucket, Key=key)["Body"].read()
+            ok = back == payload
+            self.client.delete_object(Bucket=cfg.bucket, Key=key)
+            return {"ok": ok, "wrote_bytes": len(payload),
+                    "read_back_identical": ok, "key": key,
+                    "note": "write, read and delete all succeeded" if ok
+                            else "content mismatch on read-back"}
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:220]}"}
