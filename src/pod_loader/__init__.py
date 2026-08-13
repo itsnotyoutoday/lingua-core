@@ -1,4 +1,4 @@
-"""lingua_core — loads jobs into the harness and drives them over RPC.
+"""pod_loader — loads jobs into the harness and drives them over RPC.
 
 Provisions compute (RunPod today, another provider tomorrow), publishes the workload's
 code and job spec, starts the harness pointed at them, then talks to it over /v1 until it

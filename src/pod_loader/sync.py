@@ -170,13 +170,13 @@ def resolve(workload: str, rev: str = "latest", store=None) -> str:
     except Exception as e:
         raise SyncError(
             f"no published code for workload {workload!r} ({type(e).__name__}).\n"
-            f"  Publish it first: python -m lingua_core.sync <repo>") from e
+            f"  Publish it first: python -m pod_loader.sync <repo>") from e
     return f"code/{workload}/{sha}"
 
 
 def main(argv=None):
     import argparse
-    ap = argparse.ArgumentParser(prog="python -m lingua_core.sync",
+    ap = argparse.ArgumentParser(prog="python -m pod_loader.sync",
                                  description="publish a workload's code/ to object storage")
     ap.add_argument("repo", nargs="?", default=".")
     ap.add_argument("--workload", default=None, help="defaults to the repo directory name")

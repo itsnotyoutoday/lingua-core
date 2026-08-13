@@ -3,12 +3,12 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lingua-loader-rpc"
+name = "pod-loader-rpc"
 version = "0.1.0"
 description = "Loads jobs into the lingua harness and drives them over RPC"
 requires-python = ">=3.10"
 # Runs on a laptop or a control-plane VPS, never inside a pod. The execution engine moved
-# to lingua-harness, which depends on nothing of ours; this package depends on nothing of
+# to pod-harness, which depends on nothing of ours; this package depends on nothing of
 # ours either. The two communicate through four contracts and no shared code: the job spec
 # schema, the event/status schema, the environment variable names, and the /v1 endpoints.
 #
@@ -27,5 +27,7 @@ dev = ["pytest>=8"]
 runctl = "runctl:main"
 
 [tool.setuptools]
-packages = ["lingua_core"]
-py-modules = ["runctl"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

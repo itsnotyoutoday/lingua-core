@@ -38,7 +38,7 @@ nothing about *audio*.
 
 ```
 lingua-<name>/
-  bin -> ../lingua-loader-rpc/          symlink for local ergonomics (gitignored)
+  bin -> ../pod-loader-rpc/          symlink for local ergonomics (gitignored)
   code/                           ← everything here syncs to S3 before a job runs
     <name>/stages.py              your Stage subclasses + a STAGES registry
     <name>/…                      whatever they need
@@ -51,14 +51,14 @@ The symlink only works when the repos are siblings, so a fresh clone or CI will 
 it. Depend on the package properly as well:
 
 ```bash
-pip install -e ../lingua-loader-rpc            # local
-pip install git+https://github.com/itsnotyoutoday/lingua-loader-rpc.git   # CI
+pip install -e ../pod-loader-rpc            # local
+pip install git+https://github.com/itsnotyoutoday/pod-loader-rpc.git   # CI
 ```
 
 ### 2. Write stages
 
 ```python
-from lingua_core.framework import Stage, Verification
+from pod_loader.framework import Stage, Verification
 
 class NormalizeStage(Stage):
     name     = "normalize"
@@ -116,8 +116,8 @@ outside the pod.
 ### 4. Run it
 
 ```bash
-python -m lingua_core.execute_job --spec jobs/x.json --plan   # runs NOTHING, shows readiness
-python -m lingua_core.execute_job --spec jobs/x.json          # run locally
+python -m pod_loader.execute_job --spec jobs/x.json --plan   # runs NOTHING, shows readiness
+python -m pod_loader.execute_job --spec jobs/x.json          # run locally
 runctl launch --spec jobs/x.json                              # run on a pod
 ```
 
@@ -171,7 +171,7 @@ rather than starting a second pod-hour.
 Every pod launch goes through a budget:
 
 ```python
-from lingua_core.reaper import pod
+from pod_loader.reaper import pod
 with pod(create_kwargs, budget_min=240) as p:
     ...
 ```

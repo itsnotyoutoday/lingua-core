@@ -1,7 +1,7 @@
 """One-time migration of an existing bucket to the STRUCTURE.md layout.
 
-    python -m lingua_core.migrate_layout --dry-run     # always do this first
-    python -m lingua_core.migrate_layout --apply
+    python -m pod_loader.migrate_layout --dry-run     # always do this first
+    python -m pod_loader.migrate_layout --apply
 
 ## Why this is careful
 

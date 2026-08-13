@@ -207,7 +207,7 @@ def require(spec_value: str | None = None) -> RunPodVolume:
     return vol
 
 
-if __name__ == "__main__":                                    # python -m lingua_core.volume
+if __name__ == "__main__":                                    # python -m pod_loader.volume
     import json
     try:
         v = load()

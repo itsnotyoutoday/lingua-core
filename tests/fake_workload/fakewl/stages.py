@@ -1,6 +1,6 @@
 """A fake workload: the minimum a real one must provide — Stage subclasses + a registry."""
 import os, time
-from lingua_core.framework import Stage
+from pod_loader.framework import Stage
 
 MARK = os.environ.get("FAKE_MARK", "/tmp/fakewl")
 
@@ -11,7 +11,7 @@ class Acquire(Stage):
         ctx.put("sources", [f"f{i}.wav" for i in range(5)])
         return {"n": 5}
     def verify_outputs(self, ctx):
-        from lingua_core.framework import Verification
+        from pod_loader.framework import Verification
         ok = os.path.exists(f"{MARK}/acquire.done")
         return Verification(ok=ok, checks={"marker": ok},
                             failures=[] if ok else ["acquire artifacts missing on disk"])
@@ -27,7 +27,7 @@ class Normalize(Stage):
         ctx.put("normalized", srcs)
         return {"n": len(srcs)}
     def verify_outputs(self, ctx):
-        from lingua_core.framework import Verification
+        from pod_loader.framework import Verification
         ok = os.path.exists(f"{MARK}/normalize.done")
         return Verification(ok=ok, checks={"marker": ok},
                             failures=[] if ok else ["normalized audio not on disk"])

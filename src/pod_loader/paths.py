@@ -260,7 +260,7 @@ def validate(k: str, *, where: str = "") -> str:
     raise StructureError(
         f"{'; '.join(problems)}{ctx}\n"
         f"  Known roots: {', '.join(ROOTS)}\n"
-        f"  If this is a location we should support, add a helper to lingua_core/paths.py\n"
+        f"  If this is a location we should support, add a helper to pod_loader/paths.py\n"
         f"  AND document it in STRUCTURE.md — they change together, on purpose.\n"
         f"  If it is genuinely one-off, use paths.tmp(name, reason=…), which is sweepable\n"
         f"  and obviously temporary rather than quietly permanent.")

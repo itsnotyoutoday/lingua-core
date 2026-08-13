@@ -139,6 +139,6 @@ def for_store(store) -> Flavor:
     return flavor_for(getattr(cfg, "endpoint_url", None) if cfg else None)
 
 
-if __name__ == "__main__":                            # python -m lingua_core.capabilities
+if __name__ == "__main__":                            # python -m pod_loader.capabilities
     import json
     print(json.dumps({f.name: f.describe() for f in (RUNPOD, R2, AWS, MINIO)}, indent=2))

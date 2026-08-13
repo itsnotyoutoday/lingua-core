@@ -1,6 +1,6 @@
 """Run a shell command against the network volume, on a pod, on a budget.
 
-    python -m lingua_core.podrun -- 'du -sh /workspace/*'      # volume from RUNPOD_VOLUME
+    python -m pod_loader.podrun -- 'du -sh /workspace/*'      # volume from RUNPOD_VOLUME
 
 ## Why this exists
 
