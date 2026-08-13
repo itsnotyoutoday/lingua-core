@@ -149,6 +149,53 @@ def sweep(*, max_age_min: float = 30.0, prefix: str = EPHEMERAL_PREFIX,
     return {"killed": killed, "kept": kept, "reclaimed_per_hr": round(cost, 3)}
 
 
+#: Ordered by preference, not by price. A pinned datacenter runs out of one shape while
+#: others sit free — observed repeatedly on US-NC-1, which a network volume pins you to.
+FLAVORS = ("cpu3c", "cpu5c", "cpu3g", "cpu5g", "cpu3m", "cpu5m")
+
+
+def _is_capacity_error(exc) -> bool:
+    """RunPod reports a full rack as HTTP 500, which is indistinguishable from a real
+    server error unless you read the body."""
+    return "no longer any instances" in str(exc) or "no instances available" in str(exc)
+
+
+def create_with_capacity(api, create_kwargs: dict, *, flavors=FLAVORS,
+                         clouds=("SECURE", "COMMUNITY"), verbose: bool = True):
+    """Create a pod, walking shapes until one is actually available.
+
+    There is no way to ASK RunPod whether a shape is free — no dry run, no availability
+    endpoint that reflects reality. The only honest probe is to try creating, so this
+    tries, and treats a capacity 500 as "next shape" rather than an outage.
+
+    A network volume makes this necessary rather than merely nice: it pins compute to one
+    datacenter, so when that datacenter is full there is no other region to fall back to —
+    only another shape within it. US-NC-1 has repeatedly had cpu3c full while other
+    flavors sat free.
+    """
+    tried = []
+    for cloud in clouds:
+        for flavor in flavors:
+            kw = {**create_kwargs, "cpu_flavor_ids": [flavor], "cloud_type": cloud}
+            try:
+                pod = api.create(**kw)
+                if verbose and tried:
+                    print(f"  [capacity] got {cloud}/{flavor} after {len(tried)} full",
+                          flush=True)
+                return pod, kw
+            except Exception as exc:
+                if not _is_capacity_error(exc):
+                    raise
+                tried.append(f"{cloud}/{flavor}")
+                if verbose:
+                    print(f"  [capacity] {cloud}/{flavor} full", flush=True)
+    raise RuntimeError(
+        "no capacity for any shape: " + ", ".join(tried) +
+        "\n  A network volume pins compute to its datacenter, so there is no other region "
+        "to fall back to. Either wait and retry, or run without a volume against object "
+        "storage.")
+
+
 @contextmanager
 def pod(create_kwargs: dict, *, budget_min: float = 15.0, name: str | None = None):
     """Launch a pod that CANNOT outlive its budget.
@@ -169,7 +216,7 @@ def pod(create_kwargs: dict, *, budget_min: float = 15.0, name: str | None = Non
     nm = name or f"{EPHEMERAL_PREFIX}{int(time.time())}"
     create_kwargs = {**create_kwargs, "name": nm}
 
-    p = api.create(**create_kwargs)
+    p, create_kwargs = create_with_capacity(api, create_kwargs)
     pid = p.get("id")
     if not pid:
         raise RuntimeError(f"pod create returned no id: {p}")
