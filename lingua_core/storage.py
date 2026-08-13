@@ -152,6 +152,25 @@ def load_config(path: str | Path | None = None) -> S3Config | None:
     return None
 
 
+def write_prefixes() -> tuple[str, ...]:
+    """Object-key prefixes this harness may write to, as granted by the loader.
+
+    Deliberately has no default. A default would be the harness deciding part of the
+    layout, which is the thing that keeps going wrong.
+    """
+    import os
+    raw = os.environ.get("LINGUA_WRITE_PREFIXES", "").strip()
+    if not raw:
+        run = os.environ.get("LINGUA_RUN_PREFIX", "").strip("/")
+        if run:
+            return (run + "/",)
+        raise PermissionError(
+            "LINGUA_WRITE_PREFIXES is not set, so this harness has no write grant.\n"
+            "  The loader must state where a job may write. Refusing rather than "
+            "defaulting: the default would be a second definition of the storage layout.")
+    return tuple(p.strip().strip("/") + "/" for p in raw.split(",") if p.strip())
+
+
 class Storage:
     """Thin S3 wrapper: check, upload a directory, download a prefix."""
 
@@ -191,11 +210,17 @@ class Storage:
     # -- checks -------------------------------------------------------------------------
 
     def put(self, key: str, body, *, where: str = "") -> dict:
-        """Write one object, validating the key against STRUCTURE.md first.
+        """Write one object, validating the key against the layout this package owns.
 
         The single door for writes. Enforcing here rather than at each call site is the
         difference between a structure and a suggestion — three incompatible layouts grew
         in this bucket precisely because every caller invented its own path.
+
+        This is deliberately NOT the same check the harness makes. The loader owns
+        STRUCTURE.md, so it validates against the full layout. The harness owns nothing and
+        validates against the prefixes it was granted. Two different rules for two
+        different trust levels — not a duplicated one that can drift, which is exactly what
+        went wrong when both sides shared a single definition.
 
         `where` is only for the error message, naming who tried, so the fix is obvious.
         """

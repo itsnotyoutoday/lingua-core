@@ -1,102 +1,144 @@
-"""Publish a workload's stage manifest — stage knowledge without importing the workload.
-
-    python -m lingua_core.capabilities trainer.stages:STAGES -o code/capabilities.json
+"""What an object store can actually do — because "S3-compatible" is a marketing claim.
 
 ## Why this exists
 
-The engine loads stage implementations by importing them, which requires the workload's
-code and all its dependencies — MFA, torch, librosa. That is fine inside a pod and useless
-anywhere else. A laptop deciding whether to spend a pod-hour cannot import a stack it does
-not have installed.
+RunPod's object endpoint was configured through `LINGUA_S3_*` variables and handed to
+boto3, which made every caller assume the S3 API. It is not the S3 API. Verified against
+the live endpoint, not read from a doc:
 
-So CI introspects the registry once, at publish time, and writes the result next to the
-code. Then:
+    presigned URLs      unsupported            the generated URL is rejected
+    delete_objects      HTTP 307               batch delete redirects and fails
+    head_object         403 on a 91 MB object  works on small ones, so it looks fine in tests
 
-  * `/v1/` discovery reports the real stage vocabulary for whatever code a pod carries
-  * the control plane rejects a typo'd stage name or an unwired pipeline BEFORE launching
-  * `dry_run` is meaningful off-pod
+That last one is the dangerous shape: it works until the object is big, so a size check
+passes in development and fails on real data. Code that assumed S3 semantics discovered
+the truth as a stack trace mid-job.
 
-This is what replaces the old hardcoded `STAGE_CLASSES` import in the framework: the same
-information, but sourced from the workload that owns it rather than compiled into the runner.
+Cloudflare R2 is a real implementation — presigned URLs verified working — with one quirk
+of its own: the signing region must be `auto` or requests are rejected.
 
-## What it does not capture
+So the fix is not to rename variables and move on. It is to make the *difference* legible:
+a store says what it supports, callers ask, and the answer is a documented fact rather
+than a runtime surprise. `store.supports("presigned")` is a question with an answer;
+calling `generate_presigned_url()` and hoping is not.
 
-Readiness. Whether `align`'s inputs actually exist on this mount is a question only the pod
-can answer, via `Runner.plan()`. The manifest supports the SHALLOW check — names and wiring
-— and says so rather than implying more.
+## Why capability flags rather than try/except
+
+Both work at runtime. Only one works at PLAN time. The control plane decides where a job
+runs before spending a pod, and "this pipeline needs presigned URLs, so it cannot use the
+RunPod store" is a decision worth making on a laptop in a millisecond rather than fifteen
+minutes into a billed run. Handing a caller an accurate capability set is what makes the
+provider genuinely swappable instead of nominally swappable.
 """
 from __future__ import annotations
 
-import argparse
-import importlib
-import json
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from dataclasses import dataclass, field
+
+#: Every capability this codebase actually branches on. Deliberately small: a flag nobody
+#: reads is a flag nobody maintains, and a stale capability table is worse than none.
+CAPABILITIES = (
+    "presigned",        # generate_presigned_url produces a URL that works
+    "batch_delete",     # delete_objects with more than one key
+    "head_large",       # head_object on objects over ~50 MB
+    "multipart",        # multipart upload
+    "versioning",       # object versions
+    "list_v2",          # ListObjectsV2 pagination
+)
 
 
-def introspect(registry: dict[str, Any]) -> list[dict]:
-    """Read the declared contract off each Stage class. No instantiation, no execution."""
-    rows = []
-    for name, cls in registry.items():
-        rows.append({
-            "name": name,
-            "number": getattr(cls, "number", 0),
-            "requires": list(getattr(cls, "requires", ()) or ()),
-            "produces": list(getattr(cls, "produces", ()) or ()),
-            "optional": bool(getattr(cls, "optional", False)),
-            "doc": (getattr(cls, "__doc__", "") or "").strip().split("\n")[0][:160],
-        })
-    rows.sort(key=lambda r: (r["number"], r["name"]))
-    return rows
+@dataclass(frozen=True)
+class Flavor:
+    """A store implementation and its verified limits.
+
+    `notes` carries WHY a capability is false, because a bare `False` invites someone to
+    try it again in six months and rediscover the same 307.
+    """
+    name: str
+    true_s3: bool
+    supported: frozenset
+    signing_region: str | None = None
+    notes: dict = field(default_factory=dict)
+
+    def supports(self, capability: str) -> bool:
+        if capability not in CAPABILITIES:
+            raise ValueError(
+                f"unknown capability {capability!r}; known: {', '.join(CAPABILITIES)}")
+        return capability in self.supported
+
+    def why_not(self, capability: str) -> str:
+        return self.notes.get(capability, "not supported by this store")
+
+    def require(self, *capabilities: str) -> None:
+        """Fail before the work starts, naming the store and the missing capability."""
+        missing = [c for c in capabilities if not self.supports(c)]
+        if missing:
+            lines = [f"store {self.name!r} does not support: {', '.join(missing)}"]
+            lines += [f"  {c}: {self.why_not(c)}" for c in missing]
+            lines.append("  Use a fully S3-compatible store (R2, AWS, MinIO) for this job.")
+            raise UnsupportedCapability("\n".join(lines))
+
+    def describe(self) -> dict:
+        return {"name": self.name, "true_s3": self.true_s3,
+                "supports": {c: self.supports(c) for c in CAPABILITIES},
+                "notes": self.notes}
 
 
-def build(stages_from: str, *, rev: str = "", given: list[str] | None = None) -> dict:
-    module_path, _, attr = stages_from.partition(":")
-    if not attr:
-        raise SystemExit(f"expected 'module:ATTR', got {stages_from!r}")
-    try:
-        mod = importlib.import_module(module_path)
-    except Exception as exc:
-        raise SystemExit(
-            f"cannot import {module_path!r}: {type(exc).__name__}: {exc}\n"
-            f"  sys.path[:4]={sys.path[:4]}\n"
-            f"  hint: run this from the code root, or set PYTHONPATH to it") from None
-    registry = getattr(mod, attr, None)
-    if not isinstance(registry, dict):
-        raise SystemExit(f"{stages_from} is not a dict of {{name: StageClass}}")
-
-    return {
-        "stages_from": stages_from,
-        "stages": introspect(registry),
-        # Artifacts a job may be handed without a stage producing them — a spec that points
-        # at a corpus already on the mount supplies `sources` without running `acquire`, and
-        # the wiring check must not call that broken.
-        "given": given or ["sources"],
-        "rev": rev,
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "schema": 1,
-    }
+class UnsupportedCapability(RuntimeError):
+    """Raised at plan time, not discovered at run time."""
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("stages_from", help="module:ATTR, e.g. trainer.stages:STAGES")
-    ap.add_argument("-o", "--out", default="capabilities.json")
-    ap.add_argument("--rev", default="", help="the commit this code came from")
-    ap.add_argument("--given", nargs="*", default=None,
-                    help="artifacts supplied up front (default: sources)")
-    a = ap.parse_args()
+_ALL = frozenset(CAPABILITIES)
 
-    caps = build(a.stages_from, rev=a.rev, given=a.given)
-    Path(a.out).write_text(json.dumps(caps, indent=2), encoding="utf-8")
-    print(f"{a.out}: {len(caps['stages'])} stages from {a.stages_from}")
-    for s in caps["stages"]:
-        print(f"  {s['number']:>2} {s['name']:<14} "
-              f"requires={s['requires'] or '-'} produces={s['produces'] or '-'}")
-    return 0
+RUNPOD = Flavor(
+    name="runpod", true_s3=False,
+    supported=_ALL - {"presigned", "batch_delete", "head_large", "versioning"},
+    notes={
+        "presigned": "RunPod rejects presigned URLs; verified against the live endpoint",
+        "batch_delete": "delete_objects returns HTTP 307 — delete one key at a time",
+        "head_large": "head_object returns 403 on large objects (seen at 91 MB) while "
+                      "succeeding on small ones, so this fails only on real data",
+        "versioning": "not offered",
+    })
+
+R2 = Flavor(
+    name="r2", true_s3=True, supported=_ALL, signing_region="auto",
+    notes={"_region": "the signing region must be 'auto'; anything else is rejected"})
+
+AWS = Flavor(name="aws", true_s3=True, supported=_ALL)
+MINIO = Flavor(name="minio", true_s3=True, supported=_ALL - {"versioning"},
+               notes={"versioning": "depends on deployment; assumed off"})
+
+#: An unknown endpoint is assumed fully capable. Assuming LESS would refuse to run against
+#: a perfectly good store nobody has classified yet; assuming more merely produces the same
+#: runtime error you would have had without this module.
+UNKNOWN = Flavor(name="unknown", true_s3=True, supported=_ALL,
+                 notes={"_": "unclassified endpoint — capabilities assumed, not verified"})
+
+_BY_HOST = (
+    ("runpod", RUNPOD),
+    ("r2.cloudflarestorage.com", R2),
+    ("amazonaws.com", AWS),
+    ("minio", MINIO),
+)
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def flavor_for(endpoint_url: str | None) -> Flavor:
+    """Classify a store by endpoint. Hostname is the only thing available before a call."""
+    host = (endpoint_url or "").lower()
+    if not host:
+        return AWS                      # no endpoint override means real AWS
+    for needle, flavor in _BY_HOST:
+        if needle in host:
+            return flavor
+    return UNKNOWN
+
+
+def for_store(store) -> Flavor:
+    """Classify an already-built Storage."""
+    cfg = getattr(store, "config", None) or getattr(store, "cfg", None)
+    return flavor_for(getattr(cfg, "endpoint_url", None) if cfg else None)
+
+
+if __name__ == "__main__":                            # python -m lingua_core.capabilities
+    import json
+    print(json.dumps({f.name: f.describe() for f in (RUNPOD, R2, AWS, MINIO)}, indent=2))

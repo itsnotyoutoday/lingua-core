@@ -3,13 +3,18 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lingua-core"
+name = "lingua-loader-rpc"
 version = "0.1.0"
-description = "Pipeline engine and pod control for the lingua backend"
+description = "Loads jobs into the lingua harness and drives them over RPC"
 requires-python = ">=3.10"
-# Deliberately thin. This is imported both on a laptop and inside every image, so anything
-# heavy here becomes cold-start latency on a GPU pod. Stage implementations bring their own
-# dependencies; the engine brings almost none.
+# Runs on a laptop or a control-plane VPS, never inside a pod. The execution engine moved
+# to lingua-harness, which depends on nothing of ours; this package depends on nothing of
+# ours either. The two communicate through four contracts and no shared code: the job spec
+# schema, the event/status schema, the environment variable names, and the /v1 endpoints.
+#
+# One exception crosses the line by design: paths.py, the storage layout. Workloads import
+# it because the layout is a pipeline concern that evolves with the pipelines. The harness
+# deliberately does NOT, because a frozen harness must not carry knowledge that changes.
 dependencies = [
     "requests>=2.31",
     "boto3>=1.34",

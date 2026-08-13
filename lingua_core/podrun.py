@@ -1,6 +1,6 @@
 """Run a shell command against the network volume, on a pod, on a budget.
 
-    python -m lingua_core.podrun --volume <volume-id> -- 'du -sh /workspace/*'
+    python -m lingua_core.podrun -- 'du -sh /workspace/*'      # volume from RUNPOD_VOLUME
 
 ## Why this exists
 
@@ -154,7 +154,8 @@ OPS = {
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--volume", required=True)
+    ap.add_argument("--volume", default=None,
+                    help="RunPod volume id; defaults to RUNPOD_VOLUME")
     ap.add_argument("--op", choices=sorted(OPS), help="a prepared operation")
     ap.add_argument("--budget-min", type=float, default=15)
     ap.add_argument("--timeout-min", type=float, default=12)
@@ -168,7 +169,9 @@ def main() -> int:
     else:
         ap.error("give --op or a command after --")
 
-    r = run(cmd, volume_id=a.volume, budget_min=a.budget_min, timeout_min=a.timeout_min)
+    from . import volume as _volume
+    vid = a.volume or (_volume.require().volume_id)
+    r = run(cmd, volume_id=vid, budget_min=a.budget_min, timeout_min=a.timeout_min)
     print(r.get("output") or r)
     return 0 if r.get("ok") else 1
 

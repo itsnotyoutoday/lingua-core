@@ -181,10 +181,22 @@ def sync_code() -> dict:
 
 
 def launch(spec_path: str | Path, *, image: str = IMAGE, gpus: list[str] | None = None,
-           volume_id: str = "<volume-id>", container_disk_gb: int = 30,
+           volume_id: str | None = None, container_disk_gb: int = 30,
            compute: str = "CPU", vcpus: int = 16) -> Launch:
-    """Upload the spec and provision a pod to run it. THIS STARTS BILLING."""
+    """Upload the spec and provision a pod to run it. THIS STARTS BILLING.
+
+    `volume_id` defaults to whatever RUNPOD_VOLUME resolves to. It used to default to a
+    literal account-specific id, which meant generic launch code carried one person's
+    RunPod configuration: nobody else could run it, and moving providers would have
+    required editing a function signature. The id now comes from a key file that lives
+    outside every repo.
+    """
     from .runpod_api import RunPodAPI
+    from . import volume as _volume
+
+    if volume_id is None:
+        vol = _volume.load()
+        volume_id = vol.volume_id if vol else None
 
     up = upload_spec(spec_path)
     job_id = up["job_id"]

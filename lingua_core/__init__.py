@@ -1,13 +1,21 @@
-"""lingua_core — the pipeline engine and pod control library.
+"""lingua_core — loads jobs into the harness and drives them over RPC.
 
-Two things live here, and the split matters:
+Provisions compute (RunPod today, another provider tomorrow), publishes the workload's
+code and job spec, starts the harness pointed at them, then talks to it over /v1 until it
+finishes — and guarantees it dies on budget whatever else happens.
 
-    the STAGE MODEL      framework.py — Stage, Runner, Context, Verification
-                         execute_job.py, resume.py, progress.py, spec.py
-    POD CONTROL          provider.py, runpod_api.py, batch_pod.py, reaper.py,
-                         executor.py, browse.py, registry.py, dispatch.py
+It shares no code with the harness. The two agree on four things and nothing else:
 
-A workload repo supplies stage IMPLEMENTATIONS and imports this for everything else.
-See README.md for how to build one.
+    the job spec schema        what this package writes and the harness reads
+    the event/status schema    what the harness writes and this package reads
+    the environment variables  LINGUA_JOB_SPEC, LINGUA_LOG_ROOT, LINGUA_RUN_PREFIX, …
+    the /v1 endpoints          what this package polls
+
+That is deliberate. A shared library would not even guarantee agreement — a pip install
+served a stale engine out of a layer cache exactly once, which is how the lesson was
+learned — whereas a versioned contract can be tested from both sides independently.
+
+This package also owns the storage LAYOUT (paths.py, store.py, STRUCTURE.md). The harness
+does not, and must not: that knowledge lived in both repos and the copies drifted three
+times in one day. One definition, here, passed to the harness as configuration.
 """
-__version__ = "0.1.0"
