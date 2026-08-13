@@ -31,13 +31,20 @@ running during the migration rather than needing a rewrite on day one.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 CURRENT_VERSION = 2
 
-# The default a v1 spec assumes, since v1 predates the idea of a pluggable registry.
-DEFAULT_STAGES_FROM = "trainer.stages:STAGES"
+# What a v1 spec assumes, since v1 predates the idea of a pluggable registry.
+#
+# Deployment-configurable on purpose: a pod carries exactly one workload, and it is the one
+# thing that knows which registry its own code publishes. Hardcoding a workload name here
+# would make the v1 shim work for exactly one repo and fail confusingly for every other —
+# the engine would be generic in principle and trainer-specific in practice.
+DEFAULT_STAGES_FROM = os.environ.get(
+    "LINGUA_DEFAULT_STAGES_FROM", "trainer.stages:STAGES")
 
 
 class SpecError(ValueError):
@@ -45,13 +52,16 @@ class SpecError(ValueError):
     caller is usually a human or an agent about to spend money."""
 
 
-def normalize(raw: dict, *, default_stages_from: str = DEFAULT_STAGES_FROM) -> dict:
+def normalize(raw: dict, *, default_stages_from: str | None = None) -> dict:
     """Return a v2 spec. Accepts v1 and lifts it.
 
     Deliberately non-destructive: unknown top-level keys are preserved under `params` rather
     than dropped, so a spec written against a newer workload does not silently lose fields
     when an older engine reads it.
     """
+    default_stages_from = default_stages_from or os.environ.get(
+        "LINGUA_DEFAULT_STAGES_FROM", DEFAULT_STAGES_FROM)
+
     if raw.get("spec_version") == CURRENT_VERSION:
         return _validated(dict(raw))
 
