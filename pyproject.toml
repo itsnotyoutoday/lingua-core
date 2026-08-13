@@ -6,7 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "pod-loader-rpc"
 version = "0.1.0"
 description = "Loads jobs into the lingua harness and drives them over RPC"
-requires-python = ">=3.10"
+# 3.9 because that is what ships on macOS and what this actually runs on — every module
+# imports under it, since the annotations are all postponed via __future__. Claiming 3.10
+# made "pip install -e ." fail outright on the maintainer's own machine.
+requires-python = ">=3.9"
 # Runs on a laptop or a control-plane VPS, never inside a pod. The execution engine moved
 # to pod-harness, which depends on nothing of ours; this package depends on nothing of
 # ours either. The two communicate through four contracts and no shared code: the job spec

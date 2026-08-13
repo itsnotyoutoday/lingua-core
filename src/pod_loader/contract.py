@@ -63,8 +63,11 @@ def bundled() -> dict:
     checkout of pod-harness, that is the real file, not a copy of it.
     """
     here = Path(__file__).resolve()
-    for c in (here.parent / "contract.json",
-              here.parent.parent.parent / "pod-harness" / "contract.json"):
+    repo = here.parent.parent.parent            # src/pod_loader/contract.py -> repo root
+    for c in (here.parent / "contract.json",    # vendored beside this module
+              repo / "contract.json",           # dropped in the repo root
+              repo.parent / "pod-harness" / "contract.json",   # sibling checkout
+              Path(os.environ.get("POD_HARNESS_CONTRACT", "/nonexistent"))):
         if c.is_file():
             return json.loads(c.read_text())
     raise ContractError(

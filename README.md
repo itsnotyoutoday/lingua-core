@@ -1,186 +1,188 @@
-# lingua-core
+# pod-loader-rpc
 
-The pipeline engine and pod control library. Workload repos import this; it imports nothing
-from them.
+Rent a pod, put your job on it, watch it work, and make certain it dies when it should.
 
-```
-lingua-trainer ─┐
-lingua-synth  ──┴──▶ lingua-core ──▶ lingua-runner
-   stage impls        the engine       containers + contracts
-```
+The client side of [`pod-harness`](https://github.com/itsnotyoutoday/pod-harness). It shares
+no code with it — the two agree on a versioned contract and talk over HTTP.
 
 ---
 
-## What lives here, and why the split matters
+## Introduction
 
-| the **stage model** — generic | **pod control** — generic |
+Running batch work on rented compute is three problems, not one:
+
+1. **Getting the job there.** Your code, your spec and your data have to reach a machine
+   that did not exist a minute ago — without putting credentials or a git token on it.
+2. **Knowing what happened.** The provider offers no logs API. A pod is either watched live
+   or it is a black box.
+3. **Making sure it stops.** This is the one that costs money. An in-pod timeout **cannot
+   terminate a RunPod pod** — `runpodctl` from inside returns `Unauthorized`. It detects the
+   overrun, tries to self-delete, is refused, logs the refusal, and keeps billing. Ask how I
+   know.
+
+This handles all three. It provisions compute, publishes your code and spec to object
+storage, starts the harness pointed at them, drives it over `/v1`, and guarantees
+termination from outside the pod — where it actually works.
+
+**Design constraints, and why**
+
+- **The pod holds no credentials.** Code arrives as objects the pod can already read. No
+  git access, no API key, nothing to leak if the pod is compromised.
+- **The launcher assigns; workers never discover.** A worker that scans a queue can race
+  another worker, and object storage cannot arbitrate. Every pod is told exactly what it
+  owns at creation.
+- **This package is never installed in a pod.** It can provision compute; a pod must not be
+  able to. `pod-harness` fails its build if any of these modules appear inside it.
+
+---
+
+## Use
+
+### Setup
+
+```bash
+pip install -e .
+
+# credentials, outside any repo so they cannot be committed
+cat > ~/runpod.key <<'EOF'
+api_key = <your runpod key>
+EOF
+
+cat > ~/runpod-volume.key <<'EOF'
+volume_id = <your network volume id>
+EOF
+```
+
+`RUNPOD_VOLUME` is deliberately provider-named. A network volume is RunPod-specific, cannot
+be emulated elsewhere, and **pins your compute to one datacentre** — worth seeing in a
+launcher at a glance. Point it at a file, or set it inline; details come from the RunPod API
+rather than a second copy in the file that would go stale.
+
+### The CLI
+
+```bash
+python runctl.py --help
+
+python runctl.py create   --provider runpod     # bring a runner into existence
+python runctl.py status                         # one runner, or all of them
+python runctl.py launch   --spec jobs/my.json   # sync code + spec, provision, run
+python runctl.py watch    --job <job_id>        # status + live log
+python runctl.py fetch    --job <job_id>        # pull artifacts back
+python runctl.py kill                           # terminate (stopping alone still bills)
+python runctl.py ls | cat | browse              # inspect the object store
+```
+
+### Publish your code
+
+```bash
+python -m pod_loader.sync ../my-workload
+```
+
+Uploads `<repo>/code/**` to `code/<workload>/<rev>/`, where `<rev>` is the git SHA — or
+`dev` if the tree is dirty. That distinction matters: publishing to a mutable path can
+change code under a **running** job, and Python's lazy imports would then mix two versions
+inside one process. A dirty tree never publishes under a SHA.
+
+### Validate before you spend
+
+```python
+from pod_loader import contract
+
+contract.require_valid(spec)                                  # against the bundled copy
+contract.require_valid(spec, contract.from_image(pod_url))    # against the running image
+```
+
+Prefer the second. It validates against the interface of the exact image that will run the
+job. A typo'd stage name costs a millisecond here and the full image-pull-plus-boot on a
+pod.
+
+### Guaranteed termination
+
+```python
+from pod_loader import reaper
+
+with reaper.pod(create_kwargs, budget_min=60) as pod_id:
+    ...                     # terminated on success, exception, Ctrl-C or SIGTERM
+```
+
+Three layers, each covering the previous one's failure:
+
+| layer | covers |
 |---|---|
-| `framework.py` — Stage, Runner, Context, Verification | `provider.py`, `runpod_api.py`, `batch_pod.py` |
-| `execute_job.py` — the generic entry point | `reaper.py` — external termination, budgets |
-| `resume.py` — verification-driven restart | `registry.py` — job records, guarded claims |
-| `progress.py` — sub-stage progress | `status_source.py` — where status is read |
-| `spec.py` — the job contract | `storage.py`, `objectstore.py`, `mount.py` |
-| `status.py` — the reporter | `browse.py`, `executor.py`, `estimate.py` |
+| context manager | normal exit, exceptions, signals |
+| deadline thread | wall clock exceeded while the main thread is blocked on a hung call |
+| `reaper.sweep()` | pods orphaned by a process that died before its `finally` could run |
 
-A workload supplies **stage implementations** and nothing else. It does not fork the engine,
-reimplement launching, or own the job contract.
+Every launch is journaled to disk **before** the API call returns, so a pod whose creating
+process vanished is still discoverable. A pod nobody journaled is a pod nobody can find.
 
-An earlier design made the engine stage-blind and pushed everything into an opaque blob.
-That was rejected: it destroys per-stage verification reporting, free dry-run, and resume —
-the things `framework.py` exists to provide. The engine knows about *stages*; it knows
-nothing about *audio*.
+> **Known gap.** All three layers need a process running on your machine. If your laptop
+> sleeps with a pod up and nothing external is watching, nothing reaps it. A long-lived
+> reaper service is the fix and is not built yet.
 
 ---
 
-## Building a new workload repo
+## Integration
 
-### 1. Layout
+### What crosses the boundary
 
-```
-lingua-<name>/
-  bin -> ../pod-loader-rpc/          symlink for local ergonomics (gitignored)
-  code/                           ← everything here syncs to S3 before a job runs
-    <name>/stages.py              your Stage subclasses + a STAGES registry
-    <name>/…                      whatever they need
-    capabilities.json             GENERATED by CI — do not hand-edit
-  jobs/                           job specs
-  .github/workflows/publish.yml   three-line caller of the reusable workflow
-```
+Nothing but data. There is no function this package calls in the harness and none the
+harness calls here. They agree on four things:
 
-The symlink only works when the repos are siblings, so a fresh clone or CI will not have
-it. Depend on the package properly as well:
+| | direction |
+|---|---|
+| job spec schema | loader writes, harness reads |
+| event / status schema | harness writes, loader reads |
+| environment variables | loader sets, harness consumes |
+| `/v1` endpoints | loader polls |
 
-```bash
-pip install -e ../pod-loader-rpc            # local
-pip install git+https://github.com/itsnotyoutoday/pod-loader-rpc.git   # CI
-```
+All four live in `contract.json` in the harness repo and are served at `GET /v1/contract`.
+Each side tests itself against the contract independently, so neither has to trust the
+other — and unlike a shared library, a contract cannot be silently satisfied by a stale
+cached copy.
 
-### 2. Write stages
+### Composing a launch
 
 ```python
-from pod_loader.framework import Stage, Verification
+from pod_loader import contract, volume, reaper
 
-class NormalizeStage(Stage):
-    name     = "normalize"
-    number   = 2
-    requires = ("sources",)
-    produces = ("normalized",)
-
-    def execute(self, ctx):
-        srcs = ctx.get("sources")
-        for i, f in enumerate(srcs):
-            ctx.progress(i + 1, len(srcs), note=f.name)   # sub-stage progress
-            ...
-        ctx.put("normalized", results)
-        return {"files": len(results)}
-
-    def verify_outputs(self, ctx):
-        n = count_files_on_disk()
-        return Verification(ok=n > 0, checks={"files": n},
-                            failures=[] if n else ["no normalized audio written"])
-
-STAGES = {"normalize": NormalizeStage, ...}
-```
-
-**Write `verify_outputs`.** The default only checks that the artifact landed in the context,
-which a buggy stage can satisfy while producing nothing on disk. Three real bugs in this
-project had exactly that shape. Verification is also what makes resume trustworthy — it is
-the only question that cannot lie.
-
-**Call `ctx.progress()`** in any loop over more than a handful of items. Stage events tell
-you a stage started; progress is the only thing that distinguishes working from hung.
-
-### 3. Write a job spec
-
-```json
-{
-  "spec_version": 2,
-  "idempotency_key": "neutro-v3-run-1",
-  "code":     {"root": "code/lingua-trainer/a1b2c3d", "rev": "a1b2c3d"},
-  "pipeline": {"stages_from": "trainer.stages:STAGES",
-               "stages": ["normalize", "embed", "measure"]},
-  "mount":    {"kind": "volume", "root": "corpus/"},
-  "runner":   {"provider": "runpod", "flavor": "cpu3c", "budget_min": 240},
-  "resume":   {"enabled": true, "from": "auto"},
-  "params":   {"region": "_neutro", "sources": [...], "opts": {}}
+vol = volume.require()                    # RUNPOD_VOLUME → id, datacentre, size
+env = {
+    "LINGUA_MODE": "batch",
+    "LINGUA_JOB_ID": job_id,
+    "LINGUA_JOB_SPEC": f"/workspace/{spec_key}",
+    "LINGUA_LOG_ROOT": "/workspace/runs",
+    "LINGUA_RUN_PREFIX": f"runs/{job_id}",
+    "LINGUA_WRITE_PREFIXES": f"runs/{job_id},assets/",
 }
+assert not contract.check_env(env)        # every required variable present
 ```
 
-`pipeline.stages`, `code`, `mount`, `runner` and `resume` are **framework fields** — the
-engine reads and acts on them. `params` is **yours**: the engine passes it through untouched
-and only your stages interpret it.
+Read the required set from the contract rather than hardcoding it — when the harness starts
+needing a new root, launches fail at composition time instead of the pod refusing to boot.
 
-`runner.budget_min` is not advisory. It becomes the deadline the reaper enforces from
-outside the pod.
+### Adding a provider
 
-### 4. Run it
+`provider.py` defines the interface; `RunPodProvider` and `LocalProvider` implement it.
+Adding a backend is a class, not a rewrite — everything above it speaks the same `/v1`.
+
+### Storage layout
+
+`paths.py` and `store.py` own the object-key layout, and the harness deliberately does not.
+That knowledge used to live in both, and the copies drifted three times in one day. One
+definition here; the harness is told, and is granted only the prefixes it may write to.
+
+---
+
+## Development
 
 ```bash
-python -m pod_loader.execute_job --spec jobs/x.json --plan   # runs NOTHING, shows readiness
-python -m pod_loader.execute_job --spec jobs/x.json          # run locally
-runctl launch --spec jobs/x.json                              # run on a pod
+pip install -e ".[dev]"
+python -m pod_loader.contract jobs/*.json     # validate specs offline
+python -m pod_loader.volume                   # resolve and describe the volume
+python -m pod_loader.sync ../workload --dry-run
 ```
 
----
+## Licence
 
-## Two depths of dry-run
-
-| depth | where | catches |
-|---|---|---|
-| **shallow** | laptop / control plane, no code present | typo'd stage names, unwired pipelines — read from `capabilities.json` |
-| **deep** | in-pod, code loaded | inputs that are not actually present, via `Runner.plan()` |
-
-Both are free and neither runs a stage. `plan()` and `wiring()` exist so the pipeline can be
-trusted "without spending an hour or a pod".
-
----
-
-## Resume
-
-```json
-"resume": {"enabled": true, "from": "auto"}
-```
-
-`auto` re-runs each completed stage's `verify_outputs()` and restarts at the first that
-fails. `from` also accepts a stage name (explicit) or `never`.
-
-**It never trusts a marker file.** `batch_pod.py` records what happened when it did:
-*"checkpoint survived a wiped volume → 'done: 24' with no outputs"*, and the guard added to
-fix that then *"refused to run the fixed code and reported the OLD failure"*. A record is a
-claim; verification is evidence.
-
-Everything downstream of the restart point re-runs regardless — a stage whose input was
-regenerated cannot trust its own previous output, because verification proves existence and
-shape, not provenance.
-
----
-
-## Job identity
-
-Job ids are **server-minted ULIDs** (`job_01J…`) — sortable by creation time, so listings and
-logs correlate chronologically without a join. Never client-chosen; that is what removes
-collisions once more than one job is in flight.
-
-Use `idempotency_key` instead: unique-indexed, so a retried submit returns the existing job
-rather than starting a second pod-hour.
-
----
-
-## Cost
-
-Every pod launch goes through a budget:
-
-```python
-from pod_loader.reaper import pod
-with pod(create_kwargs, budget_min=240) as p:
-    ...
-```
-
-**An in-pod ceiling is not cost control.** `runpodctl` from inside a RunPod pod returns
-`Unauthorized` — verified — so `MAX_LIFE_SEC` detects a timeout and is then refused, while
-the pod keeps billing. Termination is external, with a deadline thread that fires even when
-the main thread is wedged.
-
-`sweep()` only collects pods named `lingua-test-`. Real jobs are `lingua-<job_id>` and a
-broader prefix is refused without `force=True`, because a careless sweep would kill a
-multi-hour corpus build.
+MIT.
