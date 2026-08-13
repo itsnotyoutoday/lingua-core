@@ -26,6 +26,7 @@ implying the record's removal was enough.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import urllib.error
 import urllib.request
@@ -33,10 +34,40 @@ import urllib.request
 API = "https://rest.runpod.io/v1"
 KEY_FILES = ("runpod.key", "../runpod.key", "/run/secrets/runpod.key")
 
+def _search_up(name: str, start: pathlib.Path | None = None,
+               levels: int = 6) -> pathlib.Path | None:
+    """Look for `name` in cwd and each parent above it.
+
+    Fixed relative paths like "../runpod.key" encode how deep the caller happens to be, and
+    broke the moment the repos moved one level down into backend/. Searching upward is
+    robust to layout, and stops at the home directory so it can never wander into
+    somebody else's tree.
+    """
+    cur = (start or pathlib.Path.cwd()).resolve()
+    home = pathlib.Path.home().resolve()
+    for _ in range(levels):
+        cand = cur / name
+        if cand.is_file():
+            return cand
+        if cur == home or cur.parent == cur:
+            break
+        cur = cur.parent
+    return None
+
+
 
 def load_key(path: str | None = None) -> str | None:
-    """Read the API key. Accepts a bare `rpa_…` line or `name=value` form."""
-    for c in ([path] if path else []) + list(KEY_FILES):
+    """Read the API key. Accepts a bare `rpa_…` line or `name=value` form.
+
+    Order: an explicit path, then RUNPOD_API_KEY, then the fixed candidates, then an
+    upward search. The upward search exists because the fixed paths encoded how deep the
+    caller happened to sit, and broke the moment the repos moved into backend/.
+    """
+    env = os.environ.get("RUNPOD_API_KEY", "").strip()
+    if env and not path:
+        return env
+    found = _search_up("runpod.key")
+    for c in ([path] if path else []) + list(KEY_FILES) + ([str(found)] if found else []):
         if not c:
             continue
         p = pathlib.Path(c)

@@ -39,6 +39,21 @@ from pathlib import Path
 DEFAULT_KEY_FILES = ("runpods3.key", "/run/secrets/runpods3.key",
                      "../runpods3.key", "/app/runpods3.key")
 
+
+def _search_up(name: str, levels: int = 6):
+    """See runpod_api._search_up — fixed relative paths broke when the repos moved."""
+    import pathlib as _pl
+    cur = _pl.Path.cwd().resolve()
+    home = _pl.Path.home().resolve()
+    for _ in range(levels):
+        c = cur / name
+        if c.is_file():
+            return c
+        if cur == home or cur.parent == cur:
+            break
+        cur = cur.parent
+    return None
+
 # Never uploaded: derived, re-creatable, or secret.
 SKIP_PATTERNS = (".zip", ".tgz", ".tar.gz", ".key", ".env", ".DS_Store", "__pycache__")
 
@@ -85,6 +100,9 @@ def load_config(path: str | Path | None = None) -> S3Config | None:
     """Parse a key file of `name=value` lines. Returns None rather than raising."""
     candidates = [path] if path else []
     candidates += [os.environ.get("LINGUA_S3_KEY_FILE")] + list(DEFAULT_KEY_FILES)
+    _up = _search_up("runpods3.key")
+    if _up:
+        candidates.append(str(_up))
     for c in candidates:
         if not c:
             continue
