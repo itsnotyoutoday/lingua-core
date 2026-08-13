@@ -15,25 +15,48 @@ you can run from any subdirectory of it.
 
 ## What it can contain
 
-    # ---- destination -------------------------------------------------------
-    TARGET          = runpod | local          where to run
-    IMAGE           = ghcr.io/…/pod-harness:latest
-    FLAVORS         = cpu3c,cpu5c             shapes to try, in order
-    CLOUDS          = SECURE,COMMUNITY
-    BUDGET_MIN      = 60                      hard kill after this
-    MAX_COST_HR     = 1.50                    refuse to launch above this
+    # ---- destination ---------------------------------------------------
+    TARGET             runpod | docker | local
+    IMAGE              ghcr.io/…/pod-harness:latest
+    VCPU  DISK_GB
 
-    # ---- storage -----------------------------------------------------------
-    STORE           = runpod | cloudflare | aws | minio
-    RUNPOD_VOLUME   = ~/runpod-volume.key     RunPod-only; pins the datacentre
+    # ---- capacity, in priority order -----------------------------------
+    COMPUTE            CPU | GPU
+    CPU_FLAVORS        cpu3c,cpu3g,cpu5c,…      tried in this order
+    GPU_TYPES          NVIDIA RTX A4000,…       cheapest-capable first
+    CLOUD              SECURE,COMMUNITY
+    FALLBACK_TO_GPU    opt-in; roughly 12x the price
+    MAX_COST_HR        refuses a placement above this, rather than warning
 
-    # ---- the job -----------------------------------------------------------
-    JOB_SPEC        = jobs/benchmark.json
-    WORKLOAD        = ../lingua-maintenance   published before launch
-    AUTORUN         = true                    submit immediately, or just boot
+    # ---- cost ----------------------------------------------------------
+    BUDGET_MIN         hard kill, enforced from outside the pod
+    QUEUE_DEADLINE_MIN stop waiting for capacity after this
 
-    # ---- anything else the workload wants ----------------------------------
+    # ---- storage -------------------------------------------------------
+    STORE              runpod | cloudflare | aws | minio      (a profile, not a secret)
+    STORE_KEYFILE      durable source of truth
+    VOLUME_KEYFILE     provider-local volume gateway
+    RUNPOD_VOLUME      RunPod only; PINS the datacenter
+    CACHE              persistent | ephemeral | off
+
+    # ---- the job -------------------------------------------------------
+    JOB_SPEC  WORKLOAD  AUTORUN
+
+    # ---- anything else the workload wants ------------------------------
     ENV_LINGUA_MFA_ACOUSTIC = english_us_arpa
+
+## Why capacity is a list and not a value
+
+RunPod takes the first shape with capacity, so an ordered list degrades instead of
+failing. The walk covers three dimensions — flavor, cloud, and compute type — because a
+list within one type is not enough: on 2026-08-13 all six CPU flavours were exhausted on
+both clouds while GPU had capacity, and a network volume pins you to one datacenter so
+there is no other region to fall back to.
+
+GPU fallback is opt-in and requires `MAX_COST_HR`, because it is roughly a 12x price jump
+($0.06/hr to $0.74/hr). A four-minute benchmark does not care; a six-hour corpus build is
+$0.36 against $4.44. Cost and capacity resolve together into one decision: if the only free
+slot is too expensive, that is a reason to wait, not a placement.
 
 Keys prefixed `ENV_` are forwarded to the pod verbatim with the prefix stripped, so a
 workload can pass its own settings without this file knowing what they mean.
@@ -92,17 +115,29 @@ def _parse(text: str) -> dict[str, str]:
 class LaunchConfig:
     """A resolved launch. Everything needed to start a job, nothing secret."""
 
-    target: str = "runpod"
+    target: str = "runpod"              # runpod | docker | local
     image: str = "ghcr.io/itsnotyoutoday/pod-harness:latest"
-    flavors: tuple = ()
-    clouds: tuple = ("SECURE", "COMMUNITY")
-    budget_min: float = 60.0
-    max_cost_hr: float = 0.0            # 0 = no ceiling
     vcpu: int = 8
     disk_gb: int = 30
 
-    store: str = ""                     # profile name; "" = the default key file
-    runpod_volume: str = ""             # path or inline id; RunPod only
+    # -- capacity, in priority order ---------------------------------------------------
+    compute: str = "CPU"                # CPU | GPU
+    flavors: tuple = ()                 # empty = the reaper's default order
+    gpu_types: tuple = ()
+    clouds: tuple = ("SECURE", "COMMUNITY")
+    fallback_to_gpu: bool = False       # opt-in: ~12x the price
+    max_cost_hr: float = 0.0            # 0 = no ceiling. Refuses, does not just warn.
+
+    # -- cost --------------------------------------------------------------------------
+    budget_min: float = 60.0            # the reaper's hard kill
+    queue_deadline_min: float = 0.0     # give up waiting for capacity after this
+
+    # -- storage -----------------------------------------------------------------------
+    store: str = ""                     # profile: runpod | cloudflare | aws | minio
+    store_keyfile: str = ""             # durable source of truth
+    volume_keyfile: str = ""            # provider-local volume gateway
+    runpod_volume: str = ""             # RunPod only; PINS the datacenter
+    cache: str = "persistent"           # persistent | ephemeral | off
 
     job_spec: str = ""
     workload: str = ""
@@ -148,14 +183,21 @@ def load(path: str | Path | None = None) -> LaunchConfig:
     cfg = LaunchConfig(
         target=g("TARGET", "runpod").lower(),
         image=g("IMAGE") or LaunchConfig.image,
-        flavors=tuple(x.strip() for x in g("FLAVORS").split(",") if x.strip()),
-        clouds=tuple(x.strip().upper() for x in g("CLOUDS").split(",") if x.strip())
+        compute=g("COMPUTE", "CPU").upper(),
+        flavors=tuple(x.strip() for x in g("CPU_FLAVORS").split(",") if x.strip()),
+        gpu_types=tuple(x.strip() for x in g("GPU_TYPES").split(",") if x.strip()),
+        clouds=tuple(x.strip().upper() for x in g("CLOUD").split(",") if x.strip())
                 or LaunchConfig.clouds,
-        budget_min=num("BUDGET_MIN", 60.0),
+        fallback_to_gpu=g("FALLBACK_TO_GPU", "false").lower() in ("1","true","yes"),
         max_cost_hr=num("MAX_COST_HR", 0.0),
+        budget_min=num("BUDGET_MIN", 60.0),
+        queue_deadline_min=num("QUEUE_DEADLINE_MIN", 0.0),
         vcpu=num("VCPU", 8),
         disk_gb=num("DISK_GB", 30),
         store=g("STORE").lower(),
+        store_keyfile=g("STORE_KEYFILE"),
+        volume_keyfile=g("VOLUME_KEYFILE"),
+        cache=g("CACHE", "persistent").lower(),
         runpod_volume=g("RUNPOD_VOLUME"),
         job_spec=g("JOB_SPEC"),
         workload=g("WORKLOAD"),
@@ -177,6 +219,8 @@ def apply_to_environ(cfg: LaunchConfig) -> None:
         os.environ["PODH_S3_PROFILE"] = cfg.store
     if cfg.runpod_volume:
         os.environ["RUNPOD_VOLUME"] = str(Path(cfg.runpod_volume).expanduser())
+    if cfg.store_keyfile:
+        os.environ["PODH_S3_KEY_FILE"] = str(Path(cfg.store_keyfile).expanduser())
 
 
 def pod_env(cfg: LaunchConfig, *, job_id: str, spec_key: str, code_root: str = "",
@@ -199,10 +243,25 @@ def pod_env(cfg: LaunchConfig, *, job_id: str, spec_key: str, code_root: str = "
         "PODH_MAX_LIFE_SEC": str(int(cfg.budget_min * 60)),
         "PODH_MAX_IDLE_SEC": "0",
     }
+    if cfg.cache == "off":
+        env["PODH_CACHE_DISABLED"] = "1"
+    elif cfg.cache == "persistent":
+        env["PODH_CACHE_PERSISTENT"] = "1"
     if code_root:
         env["PODH_CODE_ROOT"] = f"{workspace}/{code_root}"
     env.update(cfg.extra_env)          # workload settings, forwarded verbatim
     return env
+
+
+def capacity_kwargs(cfg: LaunchConfig) -> dict:
+    """The capacity arguments for reaper.create_with_capacity, straight from the file."""
+    kw = {"compute": cfg.compute, "clouds": cfg.clouds,
+          "fallback_to_gpu": cfg.fallback_to_gpu, "max_cost_hr": cfg.max_cost_hr}
+    if cfg.flavors:
+        kw["flavors"] = cfg.flavors
+    if cfg.gpu_types:
+        kw["gpu_types"] = cfg.gpu_types
+    return kw
 
 
 def check(cfg: LaunchConfig) -> list[str]:
@@ -216,6 +275,15 @@ def check(cfg: LaunchConfig) -> list[str]:
         problems.append(f"WORKLOAD has no code/ directory: {cfg.workload}")
     if cfg.budget_min <= 0:
         problems.append("BUDGET_MIN must be positive — it is the only hard cost ceiling")
+    if cfg.compute not in ("CPU", "GPU"):
+        problems.append(f"COMPUTE={cfg.compute!r} is not CPU or GPU")
+    if cfg.cache not in ("persistent", "ephemeral", "off"):
+        problems.append(f"CACHE={cfg.cache!r} is not persistent, ephemeral or off")
+    if cfg.fallback_to_gpu and not cfg.max_cost_hr:
+        problems.append(
+            "FALLBACK_TO_GPU is on with no MAX_COST_HR. GPU is roughly 12x the price of "
+            "CPU here ($0.06/hr vs $0.74/hr); without a ceiling a capacity shortage "
+            "silently becomes a 12x bill.")
     if cfg.store:
         try:
             from .objectstore import resolve_config
@@ -226,26 +294,48 @@ def check(cfg: LaunchConfig) -> list[str]:
 
 
 def template() -> str:
-    return """# How this job launches. Committed alongside the job; NEVER contains secrets.
+    return """# How this job launches. Lives beside the job; NEVER contains secrets.
 
-TARGET        = runpod
-IMAGE         = ghcr.io/itsnotyoutoday/pod-harness:latest
-BUDGET_MIN    = 60
-MAX_COST_HR   = 1.50
+# ---- destination -------------------------------------------------------------
+TARGET            = runpod                 # runpod | docker | local
+IMAGE             = ghcr.io/itsnotyoutoday/pod-harness:latest
+VCPU              = 8
+DISK_GB           = 30
 
-# Store profile. Credentials live in a *.key file outside the repo.
+# ---- capacity, in priority order ---------------------------------------------
+# RunPod takes the first shape with capacity, so a sold-out model degrades rather
+# than failing. The walk covers three dimensions: flavor, cloud, and compute type.
+COMPUTE           = CPU
+CPU_FLAVORS       = cpu3c,cpu3g,cpu5c,cpu5g,cpu3m,cpu5m
+GPU_TYPES         = NVIDIA RTX A4000,NVIDIA RTX A4500,NVIDIA RTX A5000
+CLOUD             = SECURE,COMMUNITY
+
+# GPU is roughly 12x the price of CPU ($0.06/hr vs $0.74/hr), so falling back to it
+# is opt-in and requires a ceiling. A 4-minute benchmark does not care; a 6-hour
+# corpus build is $0.36 against $4.44.
+FALLBACK_TO_GPU   = false
+MAX_COST_HR       = 0.20
+
+# ---- cost --------------------------------------------------------------------
+BUDGET_MIN        = 60                     # hard kill, enforced from outside the pod
+QUEUE_DEADLINE_MIN= 240                    # stop waiting for capacity after this
+
+# ---- storage -----------------------------------------------------------------
+# Profiles, not credentials. Secrets stay in *.key files outside the repo.
 #   runpod      RunPod's endpoint — NOT true S3 (no presigned URLs, batch delete 307s)
 #   cloudflare  S3-compatible, verified
-STORE         = runpod
+STORE             = runpod
+STORE_KEYFILE     = ~/s3-cloudfare.key     # durable source of truth
+VOLUME_KEYFILE    = ~/runpod-storage.key   # provider-local volume gateway
+RUNPOD_VOLUME     = ~/runpod-volume.key    # RunPod only; PINS the datacenter
+CACHE             = persistent             # persistent | ephemeral | off
 
-# RunPod network volume. RunPod-only, and it PINS compute to one datacentre.
-RUNPOD_VOLUME = ~/runpod-volume.key
+# ---- the job -----------------------------------------------------------------
+JOB_SPEC          = jobs/my-job.json
+WORKLOAD          = ../my-workload         # published before launch
+AUTORUN           = true
 
-JOB_SPEC      = jobs/my-job.json
-WORKLOAD      = ../my-workload
-AUTORUN       = true
-
-# Forwarded to the pod with ENV_ stripped:
+# ---- forwarded to the pod with ENV_ stripped ---------------------------------
 # ENV_LINGUA_MFA_ACOUSTIC = english_us_arpa
 """
 

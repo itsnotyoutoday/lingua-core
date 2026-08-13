@@ -149,51 +149,114 @@ def sweep(*, max_age_min: float = 30.0, prefix: str = EPHEMERAL_PREFIX,
     return {"killed": killed, "kept": kept, "reclaimed_per_hr": round(cost, 3)}
 
 
-#: Ordered by preference, not by price. A pinned datacenter runs out of one shape while
-#: others sit free — observed repeatedly on US-NC-1, which a network volume pins you to.
-FLAVORS = ("cpu3c", "cpu5c", "cpu3g", "cpu5g", "cpu3m", "cpu5m")
+#: CPU shapes, in preference order. A pinned datacenter runs out of one shape while others
+#: sit free — observed repeatedly on US-NC-1, which a network volume pins you to.
+FLAVORS = ("cpu3c", "cpu3g", "cpu5c", "cpu5g", "cpu3m", "cpu5m")
+
+#: GPU types, cheapest-capable first. The plexus pattern: RunPod takes the first with
+#: capacity, so a sold-out model degrades instead of failing.
+GPU_TYPES = ("NVIDIA RTX A4000", "NVIDIA RTX A4500", "NVIDIA RTX A5000",
+             "NVIDIA GeForce RTX 4090")
 
 
 def _is_capacity_error(exc) -> bool:
-    """RunPod reports a full rack as HTTP 500, which is indistinguishable from a real
-    server error unless you read the body."""
+    """RunPod reports a full rack as HTTP 500, indistinguishable from a real server error
+    unless you read the body."""
     return "no longer any instances" in str(exc) or "no instances available" in str(exc)
 
 
-def create_with_capacity(api, create_kwargs: dict, *, flavors=FLAVORS,
-                         clouds=("SECURE", "COMMUNITY"), verbose: bool = True):
-    """Create a pod, walking shapes until one is actually available.
+class TooExpensive(RuntimeError):
+    """A placement was available but cost more than the job allows. Waiting is correct."""
+
+
+def placements(*, compute: str = "CPU", flavors=FLAVORS, gpu_types=GPU_TYPES,
+               clouds=("SECURE", "COMMUNITY"), fallback_to_gpu: bool = False):
+    """Every shape worth trying, in the order to try them.
+
+    Three dimensions, not one. plexus walked GPU models only, and that would not have
+    saved today: all six CPU flavours were exhausted on both clouds while GPU had
+    capacity. A list within one compute type is not enough when a volume pins you to a
+    single datacenter and removes every other region as an option.
+
+        flavor   cpu3c -> cpu3g -> cpu5c -> cpu5g -> cpu3m -> cpu5m
+        cloud    SECURE -> COMMUNITY
+        type     CPU -> GPU          <- the dimension plexus did not have
+
+    GPU fallback is OPT-IN because it is a ~12x price jump ($0.06/hr -> $0.74/hr). A
+    four-minute benchmark does not care; a six-hour corpus build is $0.36 against $4.44.
+    Silently taking it would be the expensive kind of helpful.
+    """
+    want_gpu = compute.upper() == "GPU"
+    for cloud in clouds:
+        for flavor in (flavors if not want_gpu else ()):
+            yield {"compute_type": "CPU", "cpu_flavor_ids": [flavor],
+                   "cloud_type": cloud, "_label": f"{cloud}/CPU/{flavor}"}
+    if want_gpu or fallback_to_gpu:
+        for cloud in clouds:
+            for gpu in gpu_types:
+                yield {"compute_type": "GPU", "gpu_type_ids": [gpu], "gpu_count": 1,
+                       "cloud_type": cloud, "_label": f"{cloud}/GPU/{gpu}"}
+
+
+def create_with_capacity(api, create_kwargs: dict, *, compute: str = "CPU",
+                         flavors=FLAVORS, gpu_types=GPU_TYPES,
+                         clouds=("SECURE", "COMMUNITY"), fallback_to_gpu: bool = False,
+                         max_cost_hr: float = 0.0, verbose: bool = True):
+    """Create a pod, walking placements until one is available AND affordable.
 
     There is no way to ASK RunPod whether a shape is free — no dry run, no availability
-    endpoint that reflects reality. The only honest probe is to try creating, so this
-    tries, and treats a capacity 500 as "next shape" rather than an outage.
+    endpoint that reflects reality — so the only honest probe is to try creating, and to
+    treat a capacity 500 as "next placement" rather than an outage.
 
-    A network volume makes this necessary rather than merely nice: it pins compute to one
-    datacenter, so when that datacenter is full there is no other region to fall back to —
-    only another shape within it. US-NC-1 has repeatedly had cpu3c full while other
-    flavors sat free.
+    Cost and capacity resolve together into one decision. If the only free slot costs more
+    than the job allows, that is not a placement — it is a reason to keep waiting. Checking
+    them separately is how you end up paying 12x for a job that was happy to wait.
     """
-    tried = []
-    for cloud in clouds:
-        for flavor in flavors:
-            kw = {**create_kwargs, "cpu_flavor_ids": [flavor], "cloud_type": cloud}
+    tried, too_dear = [], []
+    for place in placements(compute=compute, flavors=flavors, gpu_types=gpu_types,
+                            clouds=clouds, fallback_to_gpu=fallback_to_gpu):
+        label = place.pop("_label")
+        kw = {**create_kwargs, **place}
+        try:
+            pod = api.create(**kw)
+        except Exception as exc:
+            if not _is_capacity_error(exc):
+                raise
+            tried.append(label)
+            if verbose:
+                print(f"  [capacity] {label} full", flush=True)
+            continue
+
+        cost = float(pod.get("costPerHr") or 0)
+        if max_cost_hr and cost > max_cost_hr:
+            # Terminate immediately: it exists and is billing from this instant.
             try:
-                pod = api.create(**kw)
-                if verbose and tried:
-                    print(f"  [capacity] got {cloud}/{flavor} after {len(tried)} full",
-                          flush=True)
-                return pod, kw
-            except Exception as exc:
-                if not _is_capacity_error(exc):
-                    raise
-                tried.append(f"{cloud}/{flavor}")
-                if verbose:
-                    print(f"  [capacity] {cloud}/{flavor} full", flush=True)
-    raise RuntimeError(
-        "no capacity for any shape: " + ", ".join(tried) +
-        "\n  A network volume pins compute to its datacenter, so there is no other region "
-        "to fall back to. Either wait and retry, or run without a volume against object "
-        "storage.")
+                api.terminate(pod["id"])
+            except Exception:
+                pass
+            too_dear.append(f"{label} @ ${cost}/hr")
+            if verbose:
+                print(f"  [capacity] {label} available but ${cost}/hr exceeds "
+                      f"${max_cost_hr}/hr — released", flush=True)
+            continue
+
+        if verbose and tried:
+            print(f"  [capacity] got {label} @ ${cost}/hr after {len(tried)} full",
+                  flush=True)
+        return pod, kw
+
+    msg = "no acceptable placement.\n"
+    if tried:
+        msg += f"  full: {', '.join(tried)}\n"
+    if too_dear:
+        msg += (f"  available but over the ${max_cost_hr}/hr ceiling: "
+                f"{', '.join(too_dear)}\n"
+                f"  Raise MAX_COST_HR to take one, or wait for a cheaper shape.\n")
+    if not fallback_to_gpu and tried:
+        msg += "  GPU fallback is off; set FALLBACK_TO_GPU=true to widen the search.\n"
+    msg += ("  A network volume pins compute to its datacenter, so there is no other "
+            "region to fall back to. Either wait, or run without a volume.")
+    raise TooExpensive(msg) if too_dear and not tried else RuntimeError(msg)
 
 
 @contextmanager

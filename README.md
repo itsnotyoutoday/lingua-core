@@ -44,14 +44,83 @@ termination from outside the pod — where it actually works.
 pip install -e .
 
 # credentials, outside any repo so they cannot be committed
-cat > ~/runpod.key <<'EOF'
-api_key = <your runpod key>
-EOF
-
-cat > ~/runpod-volume.key <<'EOF'
-volume_id = <your network volume id>
-EOF
+cat > ~/runpod.key        <<< 'api_key = <your runpod key>'
+cat > ~/runpod-volume.key <<< 'volume_id = <your network volume id>'
 ```
+
+### `.pod.env` — the recommended way to launch
+
+**Put a `.pod.env` in the directory you launch from.** It is read from the current
+directory upward to `$HOME`, so a workload repo carries its own launch config and you can
+run from any subdirectory of it.
+
+```bash
+python -m pod_loader.launchfile --template > .pod.env
+python -m pod_loader.launchfile              # show what resolved, and check it
+```
+
+A launch has a dozen inputs. Passing them as flags means retyping them, and retyping means
+getting one wrong on the attempt that matters. In a file they are reproducible and
+reviewable — you can read a launch before it costs anything.
+
+```bash
+# ---- destination -------------------------------------------------------------
+TARGET            = runpod                 # runpod | docker | local
+IMAGE             = ghcr.io/itsnotyoutoday/pod-harness:latest
+
+# ---- capacity, in priority order ---------------------------------------------
+COMPUTE           = CPU
+CPU_FLAVORS       = cpu3c,cpu3g,cpu5c,cpu5g,cpu3m,cpu5m
+GPU_TYPES         = NVIDIA RTX A4000,NVIDIA RTX A4500,NVIDIA RTX A5000
+CLOUD             = SECURE,COMMUNITY
+FALLBACK_TO_GPU   = false
+MAX_COST_HR       = 0.20
+
+# ---- cost --------------------------------------------------------------------
+BUDGET_MIN        = 60                     # hard kill, enforced outside the pod
+QUEUE_DEADLINE_MIN= 240                    # stop waiting for capacity after this
+
+# ---- storage -----------------------------------------------------------------
+STORE             = runpod                 # a PROFILE, never a credential
+STORE_KEYFILE     = ~/s3-cloudfare.key
+VOLUME_KEYFILE    = ~/runpod-storage.key
+RUNPOD_VOLUME     = ~/runpod-volume.key    # RunPod only; PINS the datacentre
+CACHE             = persistent             # persistent | ephemeral | off
+
+# ---- the job -----------------------------------------------------------------
+JOB_SPEC          = jobs/my-job.json
+WORKLOAD          = ../my-workload
+AUTORUN           = true
+
+# ---- forwarded to the pod with ENV_ stripped ---------------------------------
+ENV_LINGUA_MFA_ACOUSTIC = english_us_arpa
+```
+
+**No secrets in it, ever.** `STORE` names a profile and the `*_KEYFILE` entries are paths;
+the credentials stay in `*.key` files outside the repo. The loader *refuses* a value under
+a key ending `SECRET`/`PASSWORD`/`API_KEY`/`ACCESS_KEY`/`TOKEN` that is not a path to an
+existing file — because this file lives beside the job, which means it gets committed.
+
+### Capacity is a priority list, not a value
+
+RunPod takes the first shape with capacity, so an ordered list degrades instead of failing.
+The walk covers **three** dimensions:
+
+```
+flavor   cpu3c → cpu3g → cpu5c → cpu5g → cpu3m → cpu5m
+cloud    SECURE → COMMUNITY
+type     CPU → GPU                    ← opt-in, and it is a ~12× price jump
+```
+
+A list within one compute type is not enough. On 2026-08-13 all six CPU flavours were
+exhausted on **both** clouds while GPU had capacity — and a network volume pins you to one
+datacentre, so there is no other region to fall back to.
+
+That is why `FALLBACK_TO_GPU` requires `MAX_COST_HR`: $0.06/hr → $0.74/hr. A four-minute
+benchmark does not care; a six-hour corpus build is $0.36 against $4.44. Cost and capacity
+resolve together into one decision — if the only free slot is too expensive, that is a
+reason to wait, not a placement. An over-budget pod that does get created is terminated
+immediately, because it bills from the instant it exists.
 
 `RUNPOD_VOLUME` is deliberately provider-named. A network volume is RunPod-specific, cannot
 be emulated elsewhere, and **pins your compute to one datacentre** — worth seeing in a
