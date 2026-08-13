@@ -155,11 +155,19 @@ class Store:
     a client cannot: knowing what kind of thing is being touched, and what that permits.
     """
 
-    def __init__(self, storage: Any = None, *, profile: str | None = None):
+    def __init__(self, storage: Any = None, *, profile: str | None = None,
+                 cache: Any = None):
         if storage is None:
             from .objectstore import get_storage
             storage = get_storage(profile)
         self.storage = storage
+        # The cache is a LAYER, not an assumption. Persistent on a RunPod volume, ephemeral
+        # on container disk, or absent entirely — the calls below cannot tell which, so
+        # moving providers is a config change rather than a rewrite.
+        if cache is None:
+            from .cache import Cache
+            cache = Cache()
+        self.cache = cache
 
     # -- helpers -------------------------------------------------------------------------
 
@@ -262,15 +270,35 @@ class Store:
         from pathlib import Path
 
         key = paths.validate(kind.locate(**loc), where=f"{kind.name}.fetch")
-        local = paths.path(key)
-        if local.exists():
-            # Already on the mount. Nothing to do — and nothing to pay for.
-            return local
 
-        dest = Path(dest) if dest else local
+        hit = self.cache.hit(key)
+        if hit is not None:
+            return hit                      # already local — no transfer, no cost
+
+        if not self.cache.enabled and dest is None:
+            raise RuntimeError(
+                f"caching is disabled and no dest given for {key}. Either enable the cache "
+                f"(LINGUA_CACHE_DIR) or pass dest=, or use stream() if the consumer can "
+                f"take a file object rather than a path.")
+
+        dest = Path(dest) if dest else self.cache.path_for(key)
         dest.mkdir(parents=True, exist_ok=True)
         self.storage.download_prefix(key, dest)
+        if self.cache.enabled:
+            self.cache.touch(key, sum(f.stat().st_size for f in dest.rglob("*")
+                                      if f.is_file()))
         return dest
+
+    def stream(self, kind: Kind, **loc):
+        """A file-like object, no disk involved.
+
+        For consumers that accept a stream — librosa, soundfile, pypdf. NOT for MFA: Kaldi
+        is a subprocess and needs a real path, which is precisely why the cache exists at
+        all rather than everything being streamed.
+        """
+        key = paths.validate(kind.locate(**loc), where=f"{kind.name}.stream")
+        return self.storage.client.get_object(
+            Bucket=self._cfg().bucket, Key=key)["Body"]
 
     def push(self, kind: Kind, local_dir: Any, *, force: bool = False,
              where: str = "", **loc) -> dict:
