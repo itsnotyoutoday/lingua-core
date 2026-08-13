@@ -88,8 +88,8 @@ def run(cmd: str, *, volume_id: str, budget_min: float = 15,
         image=image, compute_type="CPU", cpu_flavor_ids=flavors, vcpu_count=2,
         container_disk_gb=disk_gb, cloud_type="SECURE",
         network_volume_id=volume_id, volume_mount_path="/workspace",
-        env={"LINGUA_API_TOKEN": "podrun", "LINGUA_MOUNT_KIND": "volume",
-             "LINGUA_STATUS_S3": "0", "LINGUA_MODE": "shell"},
+        env={"PODH_API_TOKEN": "podrun", "PODH_MOUNT_KIND": "volume",
+             "PODH_STATUS_S3": "0", "PODH_MODE": "shell"},
         start_cmd=["bash", "-lc", wrapped],
     )
 

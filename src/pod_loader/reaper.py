@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REGISTRY = Path(os.environ.get(
-    "LINGUA_POD_REGISTRY",
+    "PODH_POD_REGISTRY",
     Path.home() / ".lingua" / "pods.jsonl"))
 
 # ## Ephemeral pods are named differently from real work, and that distinction is safety

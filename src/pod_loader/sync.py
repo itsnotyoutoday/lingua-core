@@ -93,7 +93,7 @@ def publish(repo: str | Path, *, workload: str | None = None, rev: str | None = 
     """Push `<repo>/code/**` to `code/<workload>/<rev>/`. Returns the root a job should use.
 
     The returned `root` is what goes into the spec's `code.root` and reaches the pod as
-    `LINGUA_CODE_ROOT`.
+    `PODH_CODE_ROOT`.
     """
     repo = Path(repo).resolve()
     code_dir = repo / "code"

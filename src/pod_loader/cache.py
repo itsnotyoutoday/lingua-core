@@ -59,18 +59,18 @@ class CacheConfig:
 
     @classmethod
     def from_env(cls) -> "CacheConfig":
-        if os.environ.get("LINGUA_CACHE_DISABLED", "").lower() in ("1", "true", "yes"):
+        if os.environ.get("PODH_CACHE_DISABLED", "").lower() in ("1", "true", "yes"):
             return cls(enabled=False)
-        root = os.environ.get("LINGUA_CACHE_DIR")
+        root = os.environ.get("PODH_CACHE_DIR")
         if not root:
             # Default to the workspace, which IS the network volume when one is attached
             # and ordinary container disk when one is not. The caller cannot tell, and
             # should not need to.
             from . import paths
             root = str(paths.workspace())
-        max_gb = float(os.environ.get("LINGUA_CACHE_MAX_GB", "0") or 0)
+        max_gb = float(os.environ.get("PODH_CACHE_MAX_GB", "0") or 0)
         return cls(enabled=True, root=Path(root), max_bytes=int(max_gb * 1e9),
-                   persistent=os.environ.get("LINGUA_CACHE_PERSISTENT", "") == "1")
+                   persistent=os.environ.get("PODH_CACHE_PERSISTENT", "") == "1")
 
     def describe(self) -> dict:
         return {"enabled": self.enabled, "root": str(self.root) if self.root else None,

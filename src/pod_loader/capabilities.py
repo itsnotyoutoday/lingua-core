@@ -2,7 +2,7 @@
 
 ## Why this exists
 
-RunPod's object endpoint was configured through `LINGUA_S3_*` variables and handed to
+RunPod's object endpoint was configured through `PODH_S3_*` variables and handed to
 boto3, which made every caller assume the S3 API. It is not the S3 API. Verified against
 the live endpoint, not read from a doc:
 
@@ -101,7 +101,7 @@ RUNPOD = Flavor(
     })
 
 R2 = Flavor(
-    name="r2", true_s3=True, supported=_ALL, signing_region="auto",
+    name="cloudflare", true_s3=True, supported=_ALL, signing_region="auto",
     notes={"_region": "the signing region must be 'auto'; anything else is rejected"})
 
 AWS = Flavor(name="aws", true_s3=True, supported=_ALL)

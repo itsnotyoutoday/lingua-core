@@ -148,12 +148,12 @@ from pod_loader import contract, volume, reaper
 
 vol = volume.require()                    # RUNPOD_VOLUME → id, datacentre, size
 env = {
-    "LINGUA_MODE": "batch",
-    "LINGUA_JOB_ID": job_id,
-    "LINGUA_JOB_SPEC": f"/workspace/{spec_key}",
-    "LINGUA_LOG_ROOT": "/workspace/runs",
-    "LINGUA_RUN_PREFIX": f"runs/{job_id}",
-    "LINGUA_WRITE_PREFIXES": f"runs/{job_id},assets/",
+    "PODH_MODE": "batch",
+    "PODH_JOB_ID": job_id,
+    "PODH_JOB_SPEC": f"/workspace/{spec_key}",
+    "PODH_LOG_ROOT": "/workspace/runs",
+    "PODH_RUN_PREFIX": f"runs/{job_id}",
+    "PODH_WRITE_PREFIXES": f"runs/{job_id},assets/",
 }
 assert not contract.check_env(env)        # every required variable present
 ```

@@ -70,7 +70,7 @@ ROOTS = (CORPUS, ASSETS, RUNS, RELEASES, CACHE, CODE, TMP)
 #: Where the volume is mounted inside a container. The S3 key `corpus/raw/x` is the file
 #: `/workspace/corpus/raw/x` — same bytes, two views.
 def workspace() -> Path:
-    return Path(os.environ.get("LINGUA_WORKSPACE", "/workspace"))
+    return Path(os.environ.get("PODH_WORKSPACE", "/workspace"))
 
 
 def path(key: str) -> Path:

@@ -8,7 +8,7 @@ It shares no code with the harness. The two agree on four things and nothing els
 
     the job spec schema        what this package writes and the harness reads
     the event/status schema    what the harness writes and this package reads
-    the environment variables  LINGUA_JOB_SPEC, LINGUA_LOG_ROOT, LINGUA_RUN_PREFIX, …
+    the environment variables  PODH_JOB_SPEC, PODH_LOG_ROOT, PODH_RUN_PREFIX, …
     the /v1 endpoints          what this package polls
 
 That is deliberate. A shared library would not even guarantee agreement — a pip install

@@ -120,7 +120,7 @@ class LocalStatusSource(StatusSource):
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from serve.events import EventLog          # type: ignore
         import os
-        os.environ.setdefault("LINGUA_LOG_DIR", str(self.root))
+        os.environ.setdefault("PODH_LOG_DIR", str(self.root))
         return EventLog(job_id).summary()
 
     def log(self, job_id: str, tail: int = 8192) -> dict:
@@ -151,7 +151,7 @@ class HttpStatusSource(StatusSource):
         url = f"{self.base}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"X-Lingua-Token": self.token})
+        req = urllib.request.Request(url, headers={"X-Podh-Token": self.token})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             return json.loads(r.read().decode())
 

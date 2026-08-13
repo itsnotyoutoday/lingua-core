@@ -238,7 +238,7 @@ def launch(spec_path: str | Path, *, image: str = IMAGE, gpus: list[str] | None 
         # post-mortem in data-provenance.md is the argument: 0 of 48 sampled videos
         # survived, and provenance recovery after the fact is impossible.
         env={"LINGUA_CORPUS_ROOT": "/workspace/corpus",
-             "LINGUA_OUT_ROOT": "/workspace/out",
+             "PODH_OUT_ROOT": "/workspace/out",
              "LINGUA_MANIFEST": "/workspace/code/corpus_research.json"},
     )
     L = Launch(pod_id=pod["id"], job_id=job_id,

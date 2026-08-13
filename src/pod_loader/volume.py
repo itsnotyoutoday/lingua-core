@@ -1,6 +1,6 @@
 """RunPod network volumes — deliberately named for the one provider that has them.
 
-## Why this is not called LINGUA_VOLUME
+## Why this is not called PODH_VOLUME
 
 Every other storage concept in this codebase is portable: an S3-compatible store is an
 S3-compatible store whether it is R2, MinIO or AWS, so it gets a neutral name and a
@@ -8,7 +8,7 @@ neutral interface. A RunPod network volume is not that. Nothing else offers it, 
 be emulated, and attaching one PINS compute to the volume's datacenter — which is the
 failure that blocked every job the day US-NC-1 filled up.
 
-Naming it `LINGUA_VOLUME_ID` would have implied a portable concept and quietly invited
+Naming it `PODH_VOLUME_ID` would have implied a portable concept and quietly invited
 generic code to depend on it. So the environment variable carries the provider in its
 name:
 
@@ -18,7 +18,7 @@ A reader who sees `RUNPOD_VOLUME` in a launcher knows immediately that this laun
 RunPod-only. That is the whole point of the name.
 
 The same reasoning corrects an earlier mistake. RunPod's object endpoint was configured
-through `LINGUA_S3_*` as though it were S3, and it is not: no presigned URLs, no batch
+through `PODH_S3_*` as though it were S3, and it is not: no presigned URLs, no batch
 delete, `head_object` returns 403 on large objects. Calling it S3 made code assume
 capabilities it does not have. Real S3-compatible stores (R2, AWS, MinIO) keep the neutral
 name; RunPod's partial implementation is flagged for what it is.

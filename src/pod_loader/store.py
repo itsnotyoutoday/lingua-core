@@ -278,7 +278,7 @@ class Store:
         if not self.cache.enabled and dest is None:
             raise RuntimeError(
                 f"caching is disabled and no dest given for {key}. Either enable the cache "
-                f"(LINGUA_CACHE_DIR) or pass dest=, or use stream() if the consumer can "
+                f"(PODH_CACHE_DIR) or pass dest=, or use stream() if the consumer can "
                 f"take a file object rather than a path.")
 
         dest = Path(dest) if dest else self.cache.path_for(key)
