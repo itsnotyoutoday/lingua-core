@@ -156,13 +156,37 @@ def validate_against_capabilities(spec: dict, caps: dict) -> list[str]:
         problems.append(f"unknown stage(s): {unknown}. Available: {sorted(declared)}")
         return problems          # wiring check is meaningless with unknown names
 
-    # Same wiring rule as Runner.wiring(), evaluated from the manifest instead of classes.
-    available: set[str] = set(caps.get("given") or [])
+    # A stage that is NOT in this run is assumed to have already happened — its outputs are
+    # on the mount from a previous run. That mirrors what the engine actually does: it seeds
+    # `sources` when `acquire` is absent and `normalized` when `normalize` is absent,
+    # precisely so a job can re-do embedding without re-normalising 7 minutes of audio.
+    #
+    # Without this rule the shallow check is STRICTER than the engine and rejects legitimate
+    # jobs — verified against real specs: `neutro_speakers` (embed,cluster) and
+    # `align_phones` (align) both run against already-normalised audio.
+    #
+    # What it can still catch: a stage requiring an artifact that NO stage anywhere
+    # produces — a typo, or a pipeline wired to something that does not exist. What it
+    # cannot catch is "declared present but actually absent on this mount"; only the deep
+    # check, with the volume in front of it, can answer that.
+    produced_by_absent = {a for n, s in declared.items() if n not in requested
+                          for a in s.get("produces", [])}
+    available: set[str] = set(caps.get("given") or []) | produced_by_absent
+
     for name in requested:
         s = declared[name]
         unmet = [r for r in s.get("requires", []) if r not in available]
         if unmet:
-            problems.append(
-                f"{name!r} requires {unmet}, which no earlier stage in this run produces")
+            everything = {a for d in declared.values() for a in d.get("produces", [])}
+            orphan = [r for r in unmet if r not in everything]
+            if orphan:
+                problems.append(
+                    f"{name!r} requires {orphan}, which NO stage in this workload "
+                    f"produces — a typo, or a pipeline wired to something that does not "
+                    f"exist")
+            else:
+                problems.append(
+                    f"{name!r} requires {unmet}, produced by a stage that runs LATER in "
+                    f"this list — reorder the stages")
         available |= set(s.get("produces", []))
     return problems
