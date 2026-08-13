@@ -32,10 +32,29 @@ from pathlib import Path
 warnings.filterwarnings("ignore", message=r".*Python 3\.9.*")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="boto3.*")
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# src layout: the package lives in src/, so a checkout that has not been pip-installed
+# still runs this CLI. `from pod_loader.…` used to appear below — the package name from the
+# pre-split monolith — which meant every command died with a bare ModuleNotFoundError
+# naming a package that has not existed for some time.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from runners.provider import (BaseProvider, JobSpec, LocalProvider, RunPodProvider,
-                              get_provider)
+try:
+    from pod_loader.provider import (BaseProvider, JobSpec, LocalProvider,
+                                     RunPodProvider, get_provider)
+except ModuleNotFoundError as exc:
+    # An import error in a CLI should say what to do. "No module named 'runners'" told
+    # nobody anything, least of all which repo or which install step was missing.
+    sys.exit(
+        f"runctl: cannot import the loader package ({exc.name}).\n"
+        f"\n"
+        f"  Expected to find it at: {Path(__file__).resolve().parent / 'src' / 'pod_loader'}\n"
+        f"  Present: {'yes' if (Path(__file__).resolve().parent / 'src' / 'pod_loader').is_dir() else 'NO'}\n"
+        f"\n"
+        f"  Run runctl from a checkout of pod-loader-rpc, or install it:\n"
+        f"      pip install -e .\n"
+        f"\n"
+        f"  If {exc.name!r} is a third-party package, install the dependencies:\n"
+        f"      pip install boto3 requests")
 
 MARK = {"ready": "✓", "done": "✓", "running": "🔄", "creating": "…",
         "failed": "✗", "stopped": "■", "absent": "?"}
@@ -179,7 +198,7 @@ def cmd_cat(a) -> int:
         # If a job is still running, THAT is the reason the file is absent — say so
         # rather than making the reader correlate two commands.
         try:
-            from runners.batch_pod import progress as _prog
+            from pod_loader.batch_pod import progress as _prog
             for jid in ("neutro_full",):
                 pr = _prog(jid)
                 pending = [n for n in pr["order"]
@@ -241,7 +260,7 @@ def cmd_browse(a) -> int:
     that works, without copying anything.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from runners.browse import serve
+    from pod_loader.browse import serve
 
     serve(port=a.port, open_browser=not a.no_open)
     return 0
@@ -254,8 +273,8 @@ def cmd_watch(a) -> int:
     the RunPod console lags and it keeps working after the pod is gone.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from runners.batch_pod import progress, render, tail
-    from runners.runpod_api import RunPodAPI
+    from pod_loader.batch_pod import progress, render, tail
+    from pod_loader.runpod_api import RunPodAPI
 
     prog = progress(a.job)
     api = RunPodAPI()
@@ -319,7 +338,7 @@ def cmd_watch(a) -> int:
 def cmd_launch(a) -> int:
     """Upload code + instruction file to the volume and provision a pod to run it."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from runners.batch_pod import launch, sync_code
+    from pod_loader.batch_pod import launch, sync_code
 
     if not a.no_sync:
         r = sync_code()
@@ -333,7 +352,7 @@ def cmd_launch(a) -> int:
 def cmd_kill(a) -> int:
     """Terminate pods. Stopping is not enough — a stopped pod still bills for disk."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from runners.batch_pod import teardown
+    from pod_loader.batch_pod import teardown
 
     r = teardown(a.pod)
     print(f"\n  terminated: {r['terminated'] or '(none were running)'}")

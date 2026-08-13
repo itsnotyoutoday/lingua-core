@@ -66,11 +66,10 @@ def _now() -> str:
 
 
 def _api():
-    for p in ("<REPO_ROOT>",
-              str(Path(__file__).resolve().parent.parent)):
-        if p not in sys.path:
-            sys.path.insert(0, p)
-    from .runpod_api import RunPodAPI          # type: ignore
+    # A relative import needs no sys.path surgery. This used to prepend an absolute path
+    # to the pre-split monolith on one particular laptop — dead after the repo split, and
+    # it leaked a home directory into every checkout.
+    from .runpod_api import RunPodAPI
     return RunPodAPI()
 
 
